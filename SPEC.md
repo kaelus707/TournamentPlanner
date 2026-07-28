@@ -342,10 +342,17 @@ match before its participants are known.
 
 | Form | Meaning |
 |---|---|
+| `T:A1` | team `A1` itself |
 | `G:A:1` | 1st place, group A |
 | `W:102` | winner of match 102 |
 | `L:102` | loser of match 102 |
 | `B:3:2` | 2nd of the rank-3 bucket |
+
+`T:` covers every group-phase slot. The draw fixes those participants before
+the schedule is generated, so `aTeam` is filled from the start and never
+changes. It exists so that **every ref parses through one grammar**: a ref
+matching no form here is a validation error (§7) rather than an unrecognised
+string that quietly resolves to nothing on tournament day.
 
 Resolution runs after every result entry, top to bottom, filling `aTeam` /
 `bTeam` where the source is decided. Unresolved refs render as their human label
@@ -367,8 +374,24 @@ problems. Runs after generation and before any move is applied.
 | A match's refs point to an undecided source in an earlier round | error |
 | Group sizes differ by more than one | warning |
 | Two teams share a surname within one group | warning |
+| A ref matches no form in §6.3 | error |
+| A `T:` ref names a team that is not in `Teams` | error |
+| A `W:` / `L:` ref names a match that does not exist | warning |
 
 Errors block the move. Warnings are shown and can be overridden.
+
+The last three exist because a ref that cannot be read has to be reported
+somewhere. Without them a typo, a deleted team or a renumbered match passes
+validation and only surfaces when the match is called onto court.
+
+`B:` refs are **not** ordering-checked. The match model carries no bucket id,
+so the matches that decide bucket N cannot be found. Build step 6 introduces
+`B:` refs and is where this gets resolved.
+
+The consecutive-rounds warning applies across phase boundaries too. On the
+2026 data that is two warnings in 131 matches — a team leaving the group phase
+straight into the endrunde, and a semi-final loser walking onto court for the
+third-place match. Both are worth seeing; neither blocks anything.
 
 This function is the safety net for every manual change, and should be written
 and tested first, against the 2026 data as a known-good fixture.

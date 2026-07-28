@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>conflicts() — Tests</title>
+<style>
+  :root { --ok:#1a7f37; --bad:#c0392b; --warn:#9a6700; --line:#d8dee4; --bg:#fff; --fg:#1f2328; --muted:#59636e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ok:#3fb950; --bad:#f85149; --warn:#d29922; --line:#30363d; --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  h1 { font-size:19px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .banner { padding:12px 14px; border-radius:8px; font-weight:600; margin-bottom:16px; color:#fff; }
+  .banner.ok { background:var(--ok); }
+  .banner.bad { background:var(--bad); }
+  .load { border:1px dashed var(--line); border-radius:8px; padding:20px; text-align:center; color:var(--muted); }
+  .load.over { border-color:var(--ok); }
+  .row { display:flex; gap:10px; padding:9px 0; border-top:1px solid var(--line); align-items:baseline; }
+  .tag { flex:none; font-size:11px; font-weight:700; letter-spacing:.03em;
+         padding:2px 6px; border-radius:4px; color:#fff; }
+  .tag.ok { background:var(--ok); }
+  .tag.bad { background:var(--bad); }
+  .name { font-weight:500; }
+  .detail { display:block; color:var(--muted); font-size:13px; margin-top:2px; }
+  .row.bad .detail { color:var(--bad); }
+  h2 { font-size:15px; margin:26px 0 6px; }
+  .facts { display:flex; flex-wrap:wrap; gap:6px 18px; color:var(--muted); font-size:13px; margin-bottom:8px; }
+  .facts b { color:var(--fg); }
+  ul { margin:6px 0; padding-left:20px; }
+  li { color:var(--warn); font-size:13px; }
+</style>
+</head>
+<body>
+
+<h1>conflicts() — Tests</h1>
+<div class="sub">SPEC §7, geprüft gegen das Fixture Bonsai Cup 2026 (SPEC §11).</div>
+
+<div id="load" class="load">Fixture wird geladen …</div>
+
+<div id="out"></div>
+
+<script src="../engine.js"></script>
+<script src="fixture-adapter.js"></script>
+<script src="conflicts.test.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+/*
+ * Opened straight from disk, fetch() is blocked by the file:// origin rule, so
+ * the page falls back to letting the organizer hand the two CSVs over. Keeping
+ * one copy of the fixture matters more than loading it automatically.
+ */
+async function fromFetch() {
+  const [w, t] = await Promise.all([
+    fetch('fixtures/bc2026-web.csv', { cache: 'no-store' }),
+    fetch('fixtures/bc2026-teams.csv', { cache: 'no-store' }),
+  ]);
+  if (!w.ok || !t.ok) throw new Error('Fixture nicht erreichbar');
+  return { web: await w.text(), teams: await t.text() };
+}
+
+function askForFiles() {
+  const box = $('#load');
+  box.textContent = '';
+  box.append(
+    el('div', null, 'Die Fixture-Dateien konnten nicht automatisch geladen werden (file://).'),
+    el('div', null, 'Beide CSV-Dateien aus test/fixtures hierher ziehen oder auswählen:')
+  );
+
+  const input = el('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = '.csv';
+  input.style.marginTop = '10px';
+  box.append(input);
+
+  const status = el('div');
+  status.style.marginTop = '8px';
+  box.append(status);
+
+  // Kept outside take() so the two files may also arrive one at a time.
+  const picked = {};
+
+  const take = files => {
+    let pending = files.length;
+    if (!pending) return;
+    for (const f of files) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        picked[/team/i.test(f.name) ? 'teams' : 'web'] = reader.result;
+        if (--pending > 0) return;
+        if (picked.web && picked.teams) start(picked);
+        else status.textContent = 'Es fehlt noch ' + (picked.web ? 'bc2026-teams.csv' : 'bc2026-web.csv') + '.';
+      };
+      reader.readAsText(f, 'utf-8');
+    }
+  };
+
+  input.addEventListener('change', () => take(input.files));
+  ['dragenter', 'dragover'].forEach(e =>
+    box.addEventListener(e, ev => { ev.preventDefault(); box.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(e =>
+    box.addEventListener(e, () => box.classList.remove('over')));
+  box.addEventListener('drop', ev => { ev.preventDefault(); take(ev.dataTransfer.files); });
+}
+
+function render({ results, summary }) {
+  $('#load').style.display = 'none';
+  const out = $('#out');
+  out.textContent = '';
+
+  const failed = results.filter(r => !r.pass).length;
+  out.append(el('div', 'banner ' + (failed ? 'bad' : 'ok'),
+    failed ? `${failed} von ${results.length} Tests fehlgeschlagen`
+           : `Alle ${results.length} Tests bestanden`));
+
+  const facts = el('div', 'facts');
+  const fact = (k, v) => {
+    const s = el('span', null, k + ' ');
+    s.append(el('b', null, String(v)));
+    return s;
+  };
+  facts.append(
+    fact('Spiele', summary.matches),
+    fact('Teams', summary.teams),
+    fact('Runden', summary.rounds),
+    fact('Fehler', summary.errors),
+    fact('Warnungen', summary.warnings)
+  );
+  out.append(facts);
+
+  for (const r of results) {
+    const row = el('div', 'row ' + (r.pass ? 'ok' : 'bad'));
+    row.append(el('span', 'tag ' + (r.pass ? 'ok' : 'bad'), r.pass ? 'OK' : 'FEHL'));
+    const body = el('div');
+    body.append(el('span', 'name', r.name));
+    if (r.detail) body.append(el('span', 'detail', r.detail));
+    row.append(body);
+    out.append(row);
+  }
+
+  out.append(el('h2', null, `Warnungen auf dem 2026-Spielplan (${summary.warnings})`));
+  out.append(el('div', 'sub',
+    'Warnungen blockieren nichts. Sie stehen hier, damit sichtbar ist, was die Prüfung auf echten Daten findet.'));
+  const ul = el('ul');
+  for (const w of summary.warningList) ul.append(el('li', null, w));
+  out.append(ul);
+}
+
+function start(texts) {
+  try {
+    render(ConflictsTests.run(texts.web, texts.teams));
+  } catch (err) {
+    $('#load').style.display = '';
+    $('#load').textContent = 'Tests konnten nicht ausgeführt werden: ' + err.message;
+    console.error(err);
+  }
+}
+
+fromFetch().then(start).catch(askForFiles);
+</script>
+</body>
+</html>
