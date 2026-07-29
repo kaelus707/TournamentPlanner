@@ -1,10 +1,12 @@
 /*
- * Tournament engine — validation.
+ * Tournament engine — validation and standings.
  *
  * conflicts(matches, teams, config) is the safety net described in SPEC.md §7.
- * It is pure: it reads its three inputs, mutates nothing, and returns a flat
- * list of problems. It never decides anything — the caller shows the list,
- * blocks on errors and may override warnings.
+ * standings(matches, teams, config) is the group table engine of SPEC.md §5.4.
+ *
+ * Both are pure: they read their three inputs, mutate nothing, and return a
+ * plain array. Neither decides anything — the caller shows the result, blocks
+ * on errors and may override warnings.
  *
  * Loads as a plain <script> in the browser; also requireable from Node so the
  * same code can be exercised from a terminal. No build step either way.
@@ -268,6 +270,120 @@ const TournamentEngine = (() => {
     }
   }
 
+  // ------------------------------------------------------------- standings
+
+  const WIN = 3, DRAW = 1;
+
+  /** config.walkover ("2:0") -> [winnerScore, loserScore]. Defaults to 2:0. */
+  function walkoverScore(config) {
+    const m = /^(\d+)\s*:\s*(\d+)$/.exec(String((config && config.walkover) || '').trim());
+    return m ? [+m[1], +m[2]] : [2, 0];
+  }
+
+  /**
+   * The scores a match contributes, or null if it contributes nothing yet.
+   *
+   * A walkover overrides sa/sb: §5.4 says it counts as a normal result with the
+   * configured score, so that is what the table sees. Otherwise both scores
+   * must be present. `status` is deliberately not consulted — a match carrying
+   * two scores has a result whether or not someone remembered to tap "fertig",
+   * and a table that ignores an entered score is worse than one that is a
+   * minute early.
+   */
+  function resultOf(m, wo) {
+    if (m.wo === 'a') return [wo[0], wo[1]];
+    if (m.wo === 'b') return [wo[1], wo[0]];
+    if (m.sa == null || m.sb == null) return null;
+    return [m.sa, m.sb];
+  }
+
+  const emptyRow = t => ({
+    id: t.id, group: t.group, rank: 0,
+    sp: 0, s: 0, u: 0, n: 0,
+    gf: 0, ga: 0, diff: 0, pkt: 0,
+    decider: Number(t.decider) || 0,
+    tied: false,
+  });
+
+  /** Add one played match to one team's row, from that team's point of view. */
+  function tally(row, own, other) {
+    row.sp++;
+    row.gf += own;
+    row.ga += other;
+    if (own > other) { row.s++; row.pkt += WIN; }
+    else if (own === other) { row.u++; row.pkt += DRAW; }
+    else { row.n++; }
+    row.diff = row.gf - row.ga;
+  }
+
+  /*
+   * §5.4: Punkte → Differenz → Siege → manueller Entscheid.
+   *
+   * The id compare is a fifth step the spec does not name. Without it two rows
+   * the organizer has not separated would land in whatever order the input
+   * happened to arrive in, and the same tournament would rank differently on a
+   * reload. Ties that reach it are reported as `tied` rather than hidden.
+   */
+  function compareRows(a, b) {
+    return b.pkt - a.pkt
+        || b.diff - a.diff
+        || b.s - a.s
+        || b.decider - a.decider
+        || String(a.id).localeCompare(String(b.id));
+  }
+
+  /**
+   * True when nothing the engine knows separates these two rows. Requires both
+   * to have played: before the first result every table is all-zero, and
+   * flagging that as an unresolved tie would be noise, not information.
+   */
+  const unresolvedTie = (a, b) =>
+    a.sp > 0 && b.sp > 0 &&
+    a.pkt === b.pkt && a.diff === b.diff && a.s === b.s && a.decider === b.decider;
+
+  /**
+   * Group tables, flat, sorted by group then rank — one entry per `G` line of
+   * the WEB format (§8).
+   *
+   * Membership comes from `teams`, not from the matches: `group` is stored data
+   * (§3.2), so a team that has not played yet still appears with a zero row.
+   */
+  function standings(matches, teams, config) {
+    const wo = walkoverScore(config);
+
+    const rows = new Map();
+    for (const t of teams || []) {
+      if (!t.group) continue;
+      rows.set(t.id, emptyRow(t));
+    }
+
+    for (const m of matches || []) {
+      if (m.phase !== 'Gruppe') continue;
+      const result = resultOf(m, wo);
+      if (!result) continue;
+      const a = rows.get(m.aTeam);
+      const b = rows.get(m.bTeam);
+      // An unknown or ungrouped team is a data problem, and conflicts() is
+      // where data problems are reported. Here it simply does not count.
+      if (!a || !b) continue;
+      tally(a, result[0], result[1]);
+      tally(b, result[1], result[0]);
+    }
+
+    const out = [];
+    const groups = [...new Set([...rows.values()].map(r => r.group))].sort();
+    for (const g of groups) {
+      const table = [...rows.values()].filter(r => r.group === g).sort(compareRows);
+      table.forEach((r, i) => {
+        r.rank = i + 1;
+        r.tied = (i > 0 && unresolvedTie(table[i - 1], r)) ||
+                 (i < table.length - 1 && unresolvedTie(table[i + 1], r));
+      });
+      out.push(...table);
+    }
+    return out;
+  }
+
   // ------------------------------------------------------------------ main
 
   function conflicts(matches, teams, config) {
@@ -289,7 +405,7 @@ const TournamentEngine = (() => {
     return out;
   }
 
-  return { conflicts, parseRef, errors, warnings, surnameOf };
+  return { conflicts, standings, parseRef, errors, warnings, surnameOf, walkoverScore };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = TournamentEngine;

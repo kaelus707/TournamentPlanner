@@ -107,6 +107,7 @@ tournament runs late.
 | `p1` | text | Player 1 name |
 | `p2` | text | Player 2 name |
 | `group` | `A`–`D` | Written by the draw, editable by hand |
+| `decider` | int, optional | Manual tiebreak, see §5.4. Empty for almost every team |
 
 Team display name is `p1 / p2`, derived, not stored.
 
@@ -235,10 +236,27 @@ Per group, per team: `Sp`, `S`, `U`, `N`, `Diff`, `Pkt`.
 - `Diff` = goals for − goals against
 - Order: **Punkte → Differenz → Siege → manual decider**
 
-A walkover counts as a normal result with the configured score.
+A walkover counts as a normal result with the configured score. It overrides
+whatever is in `sa`/`sb`, so a match that was started and then abandoned still
+records the walkover, not the partial score.
 
-The manual decider is a column the organizer can fill when two teams are
-identical on all three criteria. It is used only as the last tiebreak.
+A match counts once both scores are present. `status` is **not** consulted: a
+match carrying two scores has a result whether or not anyone remembered to mark
+it done, and a table that ignores an entered score is worse than one that is a
+minute early.
+
+The manual decider is the `decider` column on `Teams` (§3.2). The organizer
+fills it when two teams are identical on all three criteria; **higher wins**,
+consistent with Punkte, Differenz and Siege. Empty counts as 0. It is used only
+as the last tiebreak.
+
+After the decider comes one more step the organizer never sees: team id,
+ascending. Without it two teams the organizer has not separated would be ordered
+by whatever sequence the input happened to arrive in, and the same tournament
+would rank differently on a reload. A row that reaches this step is **flagged**
+so the screen can ask for a decider rather than present an arbitrary order as
+if it were settled. On the 2026 data no row reaches it — every tie there is
+resolved by difference.
 
 ### 5.5 Endrunde — bucketed placement
 
