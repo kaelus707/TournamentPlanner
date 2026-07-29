@@ -203,8 +203,8 @@ For N teams: base size `floor(N/4)`, with `N mod 4` groups getting one extra.
 
 | N | Sizes | Group matches |
 |---|---|---|
-| 21 | 6/5/5/5 | 40 |
-| 22 | 6/6/5/5 | 45 |
+| 21 | 6/5/5/5 | 45 |
+| 22 | 6/6/5/5 | 50 |
 | 23 | 6/6/6/5 | 55 |
 | 24 | 6/6/6/6 | 60 |
 | 30 | 8/8/7/7 | 98 |
@@ -223,6 +223,39 @@ Output, live: group sizes, group match count, endrunde match count, total
 rounds, estimated finish time. The organizer is really making a **duration
 decision**, so the finish time is the number that matters and should be the
 most prominent thing on screen.
+
+`allocation({ teams, courts, start, matchMin, semiMin, finalMode, breaks })`
+returns all of it, plus the buckets of §5.5 with the places each decides. It
+**refuses** outside 16–32 teams: `ok: false` and a problem list, and none of the
+numbers. A plausible-looking plan for a tournament this format cannot run is
+worse than no plan.
+
+**The round counts are estimates.** No schedule exists yet, so they are what the
+packing rules allow at best:
+
+```
+groupRounds = max( ceil(groupMatches / courts), 2·circleRounds − 1 )
+endRounds   = max( ceil(sharedMatches / courts), bracketDepth ) + 4
+```
+
+The second term of `groupRounds` is §5.3's two-rounds-apart rule: a group whose
+circle method yields R rounds occupies at least 2R−1 global rounds. With few
+teams and many courts that spacing binds, not capacity — 16 teams on 6 courts
+need 5 rounds, not the 4 that 24 matches would suggest.
+
+The `+ 4` is §5.6: the two semi-finals, the third-place match and the final are
+alone on court 1, so they cost a round each however many courts stand empty.
+`sharedMatches` is everything else.
+
+Both formulas reproduce 2026 exactly: `ceil(98/5) = 20` is the group phase, and
+`ceil(29/3) + 4 = 14` is the endrunde, which ran on three courts. That agreement
+is a check on the model, not a guarantee — the generators of build steps 4 and 6
+may need a round more, and once a schedule exists `timeline()` is the truth.
+
+The finish time uses the same tail: rounds `R−3 … R` are Halbfinale, Halbfinale,
+Spiel um Platz 3, Finale, so the durations are known without a schedule. An
+open-ended final has no finish (§6.1), only a start time, and the screen shows
+that instead of inventing an end.
 
 ### 5.3 Group phase generation
 

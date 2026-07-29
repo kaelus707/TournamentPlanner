@@ -1,12 +1,14 @@
 /*
- * Tournament engine — validation and standings.
+ * Tournament engine.
  *
- * conflicts(matches, teams, config) is the safety net described in SPEC.md §7.
- * standings(matches, teams, config) is the group table engine of SPEC.md §5.4.
+ * conflicts(matches, teams, config)  the safety net of SPEC.md §7
+ * standings(matches, teams, config)  the group tables of §5.4
+ * timeline(matches, config)          the timing model of §6.1
+ * allocation({ teams, courts, … })   the duration preview of §5.2
  *
- * Both are pure: they read their three inputs, mutate nothing, and return a
- * plain array. Neither decides anything — the caller shows the result, blocks
- * on errors and may override warnings.
+ * All four are pure: they read their inputs, mutate nothing, and return plain
+ * data. None of them decides anything — the caller shows the result, blocks on
+ * errors and may override warnings.
  *
  * Loads as a plain <script> in the browser; also requireable from Node so the
  * same code can be exercised from a terminal. No build step either way.
@@ -538,6 +540,219 @@ const TournamentEngine = (() => {
    */
   const currentRound = rows => (rows || []).find(r => !r.complete) || null;
 
+  // ------------------------------------------------------------ allocation
+
+  const MIN_TEAMS = 16, MAX_TEAMS = 32;
+  const GROUP_LETTERS = ['A', 'B', 'C', 'D'];
+
+  /*
+   * §5.5 bracket table. Only these five sizes can occur: the top bucket is
+   * always eight, a rank bucket is at most four because there are four groups,
+   * and the singleton merge produces five.
+   *
+   * `solo` counts the matches §5.6 puts alone on court 1 — the two semi-finals,
+   * the third-place match and the final. `depth` is the number of sequential
+   * stages the *rest* of the bracket needs, which is the floor on how far it
+   * can be compressed no matter how many courts are free.
+   */
+  const BRACKETS = {
+    2: { matches: 1,  depth: 1, solo: 0 },  // one match
+    3: { matches: 3,  depth: 3, solo: 0 },  // round robin, three teams, one match at a time
+    4: { matches: 4,  depth: 2, solo: 0 },  // two semis, then winners' and losers' final
+    5: { matches: 5,  depth: 3, solo: 0 },  // the 4-bracket, then 5th against its 4th
+    8: { matches: 12, depth: 3, solo: 4 },  // VF, 5–8-Runde, Spiele um 5 und 7 — plus the four solo rounds
+  };
+
+  /**
+   * §5.1: four groups, sizes differing by at most one. Base size is floor(N/4)
+   * and the first N mod 4 groups get one extra, so 30 becomes 8/8/7/7.
+   */
+  function groupSizes(n) {
+    const base = Math.floor(n / GROUP_LETTERS.length);
+    const extra = n % GROUP_LETTERS.length;
+    return GROUP_LETTERS.map((group, i) => ({ group, size: base + (i < extra ? 1 : 0) }));
+  }
+
+  const roundRobinMatches = m => (m * (m - 1)) / 2;
+
+  /**
+   * Group-rounds the circle method yields for a group of m (§5.3): m-1, or m
+   * when m is odd, because then one team sits out each round.
+   */
+  const circleRounds = m => (m < 2 ? 0 : m % 2 === 0 ? m - 1 : m);
+
+  /**
+   * §5.5: teams bucketed by group position. Ranks 1 and 2 form a single bucket
+   * of eight; every lower rank forms a bucket from the groups that reach it.
+   *
+   * A trailing bucket of one (N ≡ 1 mod 4) is merged into the bucket above it.
+   * That merge is what produces the size-5 bracket §5.5 describes — it is not
+   * an edge case bolted on afterwards, it is the only way a five can arise.
+   *
+   * Accepts either the objects groupSizes() returns or plain numbers.
+   */
+  function buckets(sizes) {
+    const counts = (sizes || []).map(g => Number(typeof g === 'number' ? g : g && g.size) || 0);
+    const membersAt = rank => counts.filter(s => s >= rank).length;
+    const deepest = counts.length ? Math.max(...counts) : 0;
+
+    const out = [];
+    const top = membersAt(1) + membersAt(2);
+    if (top > 0) out.push({ ranks: [1, 2], size: top });
+    for (let rank = 3; rank <= deepest; rank++) {
+      const size = membersAt(rank);
+      if (size > 0) out.push({ ranks: [rank], size });
+    }
+
+    const last = out[out.length - 1];
+    if (out.length > 1 && last.size === 1) {
+      out.pop();
+      const previous = out[out.length - 1];
+      previous.size += 1;
+      previous.ranks = previous.ranks.concat(last.ranks);
+    }
+
+    let place = 1;
+    for (const b of out) {
+      b.firstPlace = place;
+      b.lastPlace = place + b.size - 1;
+      b.matches = BRACKETS[b.size] ? BRACKETS[b.size].matches : null;
+      place = b.lastPlace + 1;
+    }
+    return out;
+  }
+
+  /**
+   * §5.3: group matches packed onto the courts, with two rounds of the same
+   * group kept two global rounds apart.
+   *
+   * Capacity is usually what binds, but not always: a group whose circle method
+   * yields R rounds occupies at least 2R-1 global rounds, and with many courts
+   * and small groups that spacing is the larger number.
+   */
+  function groupPhaseRounds(groups, courts) {
+    const matches = groups.reduce((sum, g) => sum + roundRobinMatches(g.size), 0);
+    const capacity = courts > 0 ? Math.ceil(matches / courts) : 0;
+    const spacing = Math.max(0, ...groups.map(g => 2 * circleRounds(g.size) - 1));
+    return { matches, rounds: Math.max(capacity, spacing) };
+  }
+
+  /**
+   * §5.6: the endrunde packed the same way, with one exception. The two
+   * semi-finals, the third-place match and the final are alone on court 1, so
+   * they cost one round each however many courts stand empty. Everything else
+   * shares the courts, floored by the deepest bracket.
+   */
+  function endPhaseRounds(list, courts) {
+    let shared = 0, solo = 0, depth = 0;
+    for (const b of list) {
+      const bracket = BRACKETS[b.size];
+      if (!bracket) continue;
+      shared += bracket.matches - bracket.solo;
+      solo += bracket.solo;
+      depth = Math.max(depth, bracket.depth);
+    }
+    const capacity = courts > 0 ? Math.ceil(shared / courts) : 0;
+    return { matches: shared + solo, rounds: Math.max(capacity, depth) + solo };
+  }
+
+  /**
+   * The planned clock of a day of `rounds` rounds — §6.1 before any result
+   * exists, so `liveStart` is always `plannedStart` and nothing has drifted.
+   *
+   * The durations are known without a schedule because §5.6 fixes the tail: the
+   * last four rounds are Halbfinale, Halbfinale, Spiel um Platz 3, Finale. Only
+   * the two semi-finals run at semiMin; the third-place match is an ordinary
+   * round again.
+   *
+   * `finish` is null for an open-ended final — §6.1 gives that round no
+   * duration, and inventing one here would be the same mistake in a new place.
+   * `finalStart` is the number that still holds in that case.
+   */
+  function plannedFinish(rounds, config) {
+    if (!(rounds > 0)) return { finalStart: null, finish: null };
+    const start = toMinutes(config && config.start);
+    if (start == null) return { finalStart: null, finish: null };
+
+    const matchMin = Number(config && config.matchMin) || 0;
+    const semiMin = Number(config && config.semiMin) || matchMin;
+
+    let pause = 0;
+    for (const b of (config && config.breaks) || []) {
+      if (Number(b.afterRound) < rounds) pause += Number(b.min) || 0;
+    }
+
+    // Everything before the final, i.e. rounds 1 … rounds-1: that is rounds-3
+    // rounds at matchMin (the ordinary ones plus the third-place match) and two
+    // at semiMin.
+    const finalStart = start
+      + Math.max(0, rounds - 3) * matchMin
+      + Math.min(2, rounds - 1) * semiMin
+      + pause;
+
+    const minutes = finalMinutes(config);
+    return { finalStart, finish: minutes == null ? null : finalStart + minutes };
+  }
+
+  /**
+   * §5.2: the allocation screen in one call. Everything the organizer sees
+   * while turning the team count and the court count over — and the finish
+   * time, which is the number the decision actually turns on.
+   *
+   * Outside 16–32 teams it refuses (§5.1) rather than hand back a plausible
+   * plan for a tournament this format cannot run.
+   *
+   * The two round counts are estimates: they are the best the packing rules of
+   * §5.3 and §5.6 allow. The generators of build steps 4 and 6 may need a round
+   * more, and once a schedule exists timeline() is the truth.
+   */
+  function allocation(input) {
+    const cfg = input || {};
+    const n = Number(cfg.teams);
+    const courts = Number(cfg.courts);
+    const problems = [];
+
+    if (!Number.isInteger(n) || n < MIN_TEAMS || n > MAX_TEAMS) {
+      problems.push(issue('error', 'team-count-out-of-range',
+        `${cfg.teams} Teams: das Format ist für ${MIN_TEAMS} bis ${MAX_TEAMS} Teams gedacht.`, {}));
+    }
+    if (!Number.isInteger(courts) || courts < 1) {
+      problems.push(issue('error', 'no-courts',
+        `${cfg.courts} Plätze: ohne mindestens einen Platz lässt sich nichts planen.`, {}));
+    }
+    if (problems.length) return { ok: false, problems, teams: cfg.teams, courts: cfg.courts };
+
+    const groups = groupSizes(n);
+    const list = buckets(groups);
+    for (const b of list.filter(x => !BRACKETS[x.size])) {
+      problems.push(issue('error', 'no-bracket',
+        `Für einen Topf von ${b.size} Teams (Plätze ${b.firstPlace}–${b.lastPlace}) gibt es keinen Spielplan.`, {}));
+    }
+
+    const group = groupPhaseRounds(groups, courts);
+    const end = endPhaseRounds(list, courts);
+    const rounds = group.rounds + end.rounds;
+    const clock = plannedFinish(rounds, cfg);
+
+    return {
+      ok: problems.length === 0,
+      problems,
+      teams: n,
+      courts,
+      groups,
+      buckets: list,
+      groupMatches: group.matches,
+      groupRounds: group.rounds,
+      endMatches: end.matches,
+      endRounds: end.rounds,
+      matches: group.matches + end.matches,
+      rounds,
+      start: toMinutes(cfg.start),
+      finalStart: clock.finalStart,
+      finish: clock.finish,
+    };
+  }
+
   // ------------------------------------------------------------------ main
 
   function conflicts(matches, teams, config) {
@@ -562,6 +777,7 @@ const TournamentEngine = (() => {
 
   return {
     conflicts, standings, timeline, currentRound,
+    allocation, groupSizes, buckets, plannedFinish,
     parseRef, errors, warnings, surnameOf, walkoverScore,
     toMinutes, hhmm,
   };

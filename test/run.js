@@ -17,6 +17,7 @@ const SUITES = [
   { name: 'conflicts()', suite: require('./conflicts.test.js') },
   { name: 'standings()', suite: require('./standings.test.js') },
   { name: 'timeline()',  suite: require('./timing.test.js') },
+  { name: 'allocation()', suite: require('./allocation.test.js') },
 ];
 
 const web = fixture('bc2026-web.csv');
