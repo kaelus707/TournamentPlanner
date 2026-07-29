@@ -230,6 +230,27 @@ const TournamentEngine = (() => {
     }
   }
 
+  /**
+   * §7: a group-phase match between two different groups — error.
+   *
+   * The generator cannot produce this; a hand-edited `group` cell can. It is an
+   * error rather than a warning because standings() would silently count the
+   * match in both tables, so two group tables would be wrong at once with
+   * nothing on screen to say why.
+   */
+  function checkCrossGroupMatch(out, matches, teams) {
+    for (const m of matches) {
+      if (m.phase !== 'Gruppe') continue;
+      const a = m.aTeam && teams.get(m.aTeam);
+      const b = m.bTeam && teams.get(m.bTeam);
+      if (!a || !b || !a.group || !b.group || a.group === b.group) continue;
+      out.push(issue('error', 'cross-group-match',
+        `Spiel ${m.nr}: Gruppenspiel zwischen Gruppe ${a.group} (${label(teams, m.aTeam)}) ` +
+        `und Gruppe ${b.group} (${label(teams, m.bTeam)}).`,
+        { round: m.round, matches: [m.nr], teams: [m.aTeam, m.bTeam] }));
+    }
+  }
+
   /** §7: group sizes differ by more than one — warning. */
   function checkGroupSizes(out, teams) {
     const sizes = new Map();
@@ -384,6 +405,139 @@ const TournamentEngine = (() => {
     return out;
   }
 
+  // ---------------------------------------------------------------- timing
+
+  /** "09:00" -> 540 minutes since midnight. Null when it cannot be read. */
+  function toMinutes(text) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(text == null ? '' : text).trim());
+    return m ? +m[1] * 60 + +m[2] : null;
+  }
+
+  /**
+   * 545 -> "09:05". Hours are deliberately not wrapped at 24: a tournament
+   * that computes past midnight has a configuration problem, and "25:10" says
+   * so where "01:10" would quietly hide it.
+   */
+  function hhmm(min) {
+    if (min == null) return '';
+    const h = Math.floor(min / 60);
+    const m = Math.round(min - h * 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
+  /** config.finalMode: "set" (open-ended) or a number of minutes. */
+  function finalMinutes(config) {
+    const raw = config && config.finalMode;
+    const text = String(raw == null ? '' : raw).trim();
+    const n = Number(text);
+    return text !== '' && Number.isFinite(n) ? n : null;
+  }
+
+  /**
+   * §6.1: matchMin, or semiMin for a round containing a semi-final.
+   *
+   * A round containing an open-ended final has no duration at all — null, not
+   * zero, so "unknown" cannot be mistaken for "instant" by anything adding it
+   * up downstream.
+   */
+  function durationOf(ms, config) {
+    const matchMin = Number(config && config.matchMin) || 0;
+    if (ms.some(m => m.phase === 'Finale')) return finalMinutes(config);
+    if (ms.some(m => m.phase === 'HF')) return Number(config && config.semiMin) || matchMin;
+    return matchMin;
+  }
+
+  /** Total break minutes booked after this round (§3.1 — breaks anchor to rounds). */
+  function breakAfter(config, round) {
+    let total = 0;
+    for (const b of (config && config.breaks) || []) {
+      if (Number(b.afterRound) === round) total += Number(b.min) || 0;
+    }
+    return total;
+  }
+
+  /** §6.1: a round is complete when every match in it has status "done". */
+  const isComplete = ms => ms.length > 0 && ms.every(m => m.status === 'done');
+
+  /**
+   * Clock time of the last result entered in this round, or null when the round
+   * carries no `doneAt` stamp at all.
+   *
+   * Null is the normal case for historical data written before the column
+   * existed — the 2026 fixture is entirely stamp-free. The caller falls back to
+   * the computed end rather than treating a missing stamp as midnight.
+   */
+  function lastResultIn(ms) {
+    let last = null;
+    for (const m of ms) {
+      const t = toMinutes(m.doneAt);
+      if (t != null && (last == null || t > last)) last = t;
+    }
+    return last;
+  }
+
+  /**
+   * One row per round, ascending — the whole timing model of §6.1 in one pass.
+   *
+   *   planned = config.start + Σ (duration + breaks) over earlier rounds
+   *   start   = max(planned, end of the previous round)
+   *   end     = last result stamp if complete, else start + duration
+   *
+   * The break after a late round is absorbed, not appended: `start` maxes
+   * against the previous round's raw end, so a round that overruns eats into
+   * the Platzpflege instead of pushing it. That is §6.1 read literally, and it
+   * is also what actually happens on a court.
+   */
+  function timeline(matches, config) {
+    const ms = [...(matches || [])].sort((a, b) => (a.nr || 0) - (b.nr || 0));
+    const rounds = groupByRound(ms);
+
+    const out = [];
+    let planned = toMinutes(config && config.start);
+    let previousEnd = null;
+
+    for (const [round, inRound] of rounds) {
+      const duration = durationOf(inRound, config);
+      const complete = isComplete(inRound);
+
+      const start = planned == null ? previousEnd
+                  : previousEnd == null ? planned
+                  : Math.max(planned, previousEnd);
+
+      const stamped = complete ? lastResultIn(inRound) : null;
+      const end = stamped != null ? stamped
+                : (duration == null || start == null) ? null
+                : start + duration;
+
+      out.push({
+        round,
+        nrs: inRound.map(m => m.nr),
+        duration,
+        planned,
+        start,
+        end,
+        delta: (start == null || planned == null) ? 0 : start - planned,
+        complete,
+        // An open round is one whose end cannot be computed: the open-ended
+        // final, until someone stamps a result on it.
+        open: end == null,
+      });
+
+      if (planned != null) planned += (duration || 0) + breakAfter(config, round);
+      previousEnd = end;
+    }
+
+    return out;
+  }
+
+  /**
+   * §9.1: the current round is the first incomplete one. Returns the row, or
+   * null once everything is played. This is the fix for the 2026 bug where a
+   * single unplayed match pinned "Jetzt" to an early time block — completeness
+   * decides, not the clock.
+   */
+  const currentRound = rows => (rows || []).find(r => !r.complete) || null;
+
   // ------------------------------------------------------------------ main
 
   function conflicts(matches, teams, config) {
@@ -398,6 +552,7 @@ const TournamentEngine = (() => {
     checkCourtDoubleBooked(out, rounds);
     checkRoundCapacity(out, rounds, config);
     checkRefsDecided(out, ms, teamIdx, byNr, lastGroupRound);
+    checkCrossGroupMatch(out, ms, teamIdx);
     checkConsecutiveRounds(out, ms, teamIdx);
     checkGroupSizes(out, teamIdx);
     checkDuplicateSurnames(out, teamIdx);
@@ -405,7 +560,11 @@ const TournamentEngine = (() => {
     return out;
   }
 
-  return { conflicts, standings, parseRef, errors, warnings, surnameOf, walkoverScore };
+  return {
+    conflicts, standings, timeline, currentRound,
+    parseRef, errors, warnings, surnameOf, walkoverScore,
+    toMinutes, hhmm,
+  };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = TournamentEngine;

@@ -170,8 +170,17 @@ const FixtureAdapter = (() => {
       wo: null,
     }));
 
+    // The zeit the v1 file recorded for each round, index 0 = round 1. The
+    // engine no longer stores times, but these are fixture data: they are what
+    // the timing model must reproduce (§11).
+    const roundStarts = [];
+    for (const m of raw) {
+      const i = roundOf.get(m.nr) - 1;
+      if (roundStarts[i] == null) roundStarts[i] = m.zeit;
+    }
+
     return {
-      meta, matches, standings, placements, breaks,
+      meta, matches, standings, placements, breaks, roundStarts,
       rounds: matches.length ? Math.max(...roundOf.values()) : 0,
     };
   }

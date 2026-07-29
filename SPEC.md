@@ -134,8 +134,20 @@ only the result and status columns change.
 | `sb` | int | admin |
 | `status` | text | admin — `open` / `playing` / `done` |
 | `wo` | text | admin — empty, `a`, or `b` (walkover winner) |
+| `doneAt` | `HH:MM` | admin app — clock time the result was saved, empty until then |
 
-No time column. Time is computed.
+No planned time column. Planned time is computed.
+
+`doneAt` is the one exception, and it is not a plan — it is an observation. §6.1
+needs the time a round actually finished in order to show drift at all; without
+it `finishOf` can only ever return the computed end, and the schedule can never
+notice that it is running late. The app writes it on save, and it stays
+hand-editable like every other cell, because an organizer correcting a
+mis-tapped result at 11:40 needs to be able to correct its time too.
+
+A missing `doneAt` on a finished match is not an error. Historical data has
+none, and §6.1 falls back to the computed end rather than reading an absent
+stamp as a time.
 
 ### 3.4 `WEB`
 
@@ -322,7 +334,19 @@ liveStart(r)    = max(plannedStart(r), finishOf(r-1))
 ```
 
 `duration(r)` is `matchMin`, or `semiMin` for a round containing a semi-final.
-An open-ended final has no computed end.
+An open-ended final has no computed end — its duration is *absent*, not zero,
+so nothing downstream can add it up as if the final took no time.
+
+`timeOfLastResultIn(r)` is the latest `doneAt` in the round (§3.3). When the
+round carries no stamp at all, `finishOf` falls back to `liveStart(r) +
+duration(r)`. That is the normal path for historical data and for any round
+entered without the app.
+
+**A break after a late round is absorbed, not appended.** `liveStart` maxes
+against the previous round's raw `finishOf`, so a round that overruns eats into
+the Platzpflege instead of pushing it down the day. This is the formula above
+read literally, and it is also what happens on a court: when the tournament is
+late, the break is what gives.
 
 The display shows `liveStart(r)` and, when it differs from planned, the delta
 (`09:22 · +2 min`). The current round is the first round that is not complete.
@@ -392,15 +416,21 @@ problems. Runs after generation and before any move is applied.
 | A match's refs point to an undecided source in an earlier round | error |
 | Group sizes differ by more than one | warning |
 | Two teams share a surname within one group | warning |
+| A `Gruppe` match pairs teams from two different groups | error |
 | A ref matches no form in §6.3 | error |
 | A `T:` ref names a team that is not in `Teams` | error |
 | A `W:` / `L:` ref names a match that does not exist | warning |
 
 Errors block the move. Warnings are shown and can be overridden.
 
-The last three exist because a ref that cannot be read has to be reported
+The three ref checks exist because a ref that cannot be read has to be reported
 somewhere. Without them a typo, a deleted team or a renumbered match passes
 validation and only surfaces when the match is called onto court.
+
+The cross-group check is an error rather than a warning because §5.4 counts a
+group match in both teams' tables. One hand-edited `group` cell therefore
+corrupts two group tables at once, with nothing on screen to say why. The
+generator cannot produce this; a person editing the sheet can.
 
 `B:` refs are **not** ordering-checked. The match model carries no bucket id,
 so the matches that decide bucket N cannot be found. Build step 6 introduces

@@ -194,6 +194,14 @@ const ConflictsTests = (() => {
     test('Ref auf ein Spiel, das es nicht gibt → Warnung', () => eqCodes(
       E.conflicts([match(1, 1, 1, { aRef: 'W:999' })], FOUR, { courts: 2 }), ['ref-source-unknown']));
 
+    test('Gruppenspiel zwischen zwei Gruppen → Fehler', () => eqCodes(
+      E.conflicts([pair(1, 1, 1, 'A1', 'B1')], [
+        team('A1', 'A', 'Adler Max', 'Berger Nina'),
+        team('A2', 'A', 'Conrad Tom', 'Dorn Lea'),
+        team('B1', 'B', 'Engel Ida', 'Frank Udo'),
+        team('B2', 'B', 'Gross Ben', 'Huber Mia'),
+      ], { courts: 2 }), ['cross-group-match']));
+
     test('Gruppengrößen weichen um mehr als eins ab → Warnung', () => eqCodes(
       E.conflicts([], FOUR.concat([
         team('B1', 'B', 'Meier Ute', 'Nolte Kai'),

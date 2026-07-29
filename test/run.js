@@ -16,6 +16,7 @@ const fixture = name => fs.readFileSync(path.join(__dirname, 'fixtures', name), 
 const SUITES = [
   { name: 'conflicts()', suite: require('./conflicts.test.js') },
   { name: 'standings()', suite: require('./standings.test.js') },
+  { name: 'timeline()',  suite: require('./timing.test.js') },
 ];
 
 const web = fixture('bc2026-web.csv');
