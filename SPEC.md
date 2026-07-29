@@ -365,6 +365,20 @@ two semi-finals, final and third-place match on one side; a 5–8 round with a
 (21, 25, 29 teams). Merge it upward so the preceding bucket has 5 members and
 use the size-5 bracket.
 
+**Bucket seeding.** A bucket's members are ordered by **rank, then by group
+letter**, and `B:<id>:<n>` (§6.3) names the n-th of them. The id is the bucket's
+first rank, so the top bucket is `B:1`, the rank-3 bucket is `B:3`.
+
+For the rank-3 bucket that reads `B:3:1 … B:3:4` = 3rd of A, B, C, D. For a
+merged bucket of ranks 5 and 6 it reads `B:5:1 … B:5:4` = 5th of A, B, C, D and
+`B:5:5` = 6th of A — which is exactly the team the size-5 bracket wants in fifth
+place, arrived at without comparing points across groups that played different
+numbers of matches (§5.1).
+
+The brackets seed 1 v 4 and 2 v 3, and 1-8, 4-5, 2-7, 3-6 for the eight. Because
+the members are ordered by group within a rank, every one of those pairings is
+between two different groups.
+
 **Match count.** For 24 teams: 12 + 4 + 4 + 4 + 4 = 28 endrunde matches.
 For 30 teams: 12 + 4×5 + 1 = 33, matching the 2026 event.
 
@@ -374,6 +388,22 @@ Lower buckets play first, as in 2026: the last places are decided early so that
 those teams can go home, and the final is the last match of the day on court 1.
 
 Semi-finals, the third-place match and the final are scheduled alone on court 1.
+They are taken only once no shared-court match is left, which is what keeps the
+final the last match of the day.
+
+**One deep match per round.** Run purely by bucket order, the eight-team bracket
+starts last and its chain — quarter-final, 5–8 round, fifth-place match — then
+runs on alone at the end with the courts beside it empty, costing a round. So
+each round admits one match from the longest remaining chain and fills the rest
+by place. That is the shape of the 2026 endrunde: a quarter-final on court 1,
+placement matches on the courts beside it.
+
+Two matches share a round only if their **slots** are disjoint, a slot being a
+bucket seed, the winner of a match, or the loser of a match. Winner and loser of
+the same match are different slots — which is why the 5–8 round and the
+semi-finals may run side by side although both descend from the same four
+quarter-finals, while a round robin of three, whose matches share seeds, comes
+out strictly sequential.
 
 ---
 
@@ -492,9 +522,18 @@ group match in both teams' tables. One hand-edited `group` cell therefore
 corrupts two group tables at once, with nothing on screen to say why. The
 generator cannot produce this; a person editing the sheet can.
 
-`B:` refs are **not** ordering-checked. The match model carries no bucket id,
-so the matches that decide bucket N cannot be found. Build step 6 introduces
-`B:` refs and is where this gets resolved.
+`B:` refs are ordering-checked against the **end of the group phase**, not
+against individual matches. A bucket is filled by group position (§5.5), so
+what a `B:` ref waits for is a finished group table — the same thing a `G:` ref
+waits for, except that a bucket draws from every group that reaches its rank and
+the match does not say which groups those are. Checking against the last group
+round of any group is the strict reading, and the right one: an endrunde match
+that starts before the slowest group has finished is wrong even if the bucket it
+happens to draw from is already settled.
+
+This replaces an earlier note that deferred the check to build step 6 on the
+grounds that the match model carries no bucket id. It carries none, and needs
+none — the group phase boundary is enough.
 
 The consecutive-rounds warning applies across phase boundaries too. On the
 2026 data that is two warnings in 131 matches — a team leaving the group phase

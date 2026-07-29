@@ -224,10 +224,22 @@ const TournamentEngine = (() => {
           continue;
         }
 
-        // ref.kind === 'B': a bucket ref cannot be ordered-checked yet. The
-        // match model carries no bucket id, so there is no way to find the
-        // matches that decide bucket N. Revisit in build step 6, which is what
-        // introduces B: refs in the first place. The 2026 fixture uses none.
+        // ref.kind === 'B'. A bucket is filled by group position (§5.5), so a
+        // B: ref needs the same thing a G: ref needs — a finished group table.
+        // It needs all four of them rather than one, because a bucket draws
+        // from every group that reaches its rank, and which groups those are
+        // cannot be read off the match.
+        //
+        // This is what §7 left open for build step 6. Checking against the last
+        // group round of *any* group is deliberately the strict reading: an
+        // endrunde match that starts before the slowest group has finished is
+        // wrong even if the bucket it draws from happens to be settled.
+        const groupPhaseOver = Math.max(-Infinity, ...lastGroupRound.values());
+        if (m.round != null && Number.isFinite(groupPhaseOver) && groupPhaseOver >= m.round) {
+          out.push(issue('error', 'ref-not-decided',
+            `Spiel ${m.nr} (Runde ${m.round}) braucht Topf ${ref.bucket}, der erst nach Runde ${groupPhaseOver} feststeht.`,
+            { round: m.round, matches: [m.nr] }));
+        }
       }
     }
   }
@@ -612,11 +624,27 @@ const TournamentEngine = (() => {
       previous.ranks = previous.ranks.concat(last.ranks);
     }
 
+    /*
+     * Who is actually in the bucket, ordered by rank and then by group letter.
+     * That order is the bucket's seeding, and `B:<id>:<n>` (§6.3) names its
+     * n-th entry — so B:5:5 in a merged bucket is the sixth-placed team, the
+     * weakest of the five, without anyone comparing points across groups.
+     */
+    const letters = (sizes || []).map((g, i) =>
+      (typeof g === 'number' || !g || !g.group) ? GROUP_LETTERS[i] : g.group);
+
     let place = 1;
     for (const b of out) {
+      b.id = b.ranks[0];
       b.firstPlace = place;
       b.lastPlace = place + b.size - 1;
       b.matches = BRACKETS[b.size] ? BRACKETS[b.size].matches : null;
+      b.members = [];
+      for (const rank of b.ranks) {
+        counts.forEach((size, i) => {
+          if (size >= rank) b.members.push({ group: letters[i], rank });
+        });
+      }
       place = b.lastPlace + 1;
     }
     return out;
@@ -1034,6 +1062,298 @@ const TournamentEngine = (() => {
     };
   }
 
+  // --------------------------------------------------------- endrunde plan
+
+  /*
+   * A slot is where one side of a match comes from: a bucket seed, or the
+   * winner or the loser of an earlier match. Two matches may share a global
+   * round only if their slot sets are disjoint.
+   *
+   * Winner and loser of the same match are *different* slots, which is the
+   * whole point. The 5–8 round and the semi-finals both descend from the four
+   * quarter-finals, but one takes the losers and the other the winners, so they
+   * never meet the same team and may run side by side. A round robin of three
+   * shares its seeds instead, and comes out strictly sequential.
+   */
+  const fromSeed = ref => ({ kind: 'seed', ref });
+  const fromWinner = key => ({ kind: 'W', key });
+  const fromLoser = key => ({ kind: 'L', key });
+
+  const slotId = side => (side.kind === 'seed' ? side.ref : `${side.kind}:${side.key}`);
+  const sourceKey = side => (side.kind === 'seed' ? null : side.key);
+
+  /**
+   * §5.5: one bucket's bracket, as match specs with symbolic sides.
+   *
+   * Match numbers do not exist yet — the packer decides the order, and only
+   * then can a W:/L: ref name a number. Until then a side points at another
+   * spec by key.
+   *
+   * The labels are the ones the 2026 sheet used, because the organizer reads
+   * them on the court and they should not change under them.
+   */
+  function bracketFor(bucket) {
+    const id = bucket.id;
+    const p = bucket.firstPlace;
+    const size = bucket.size;
+
+    const seed = n => fromSeed(`B:${id}:${n}`);
+    const key = name => `T${id}.${name}`;
+    const platz = n => `Spiel um Platz ${n}`;
+    const runde = (from, to) => `Platzierungsrunde Platz ${from}–${to}`;
+
+    if (size === 2) {
+      return [{ key: key('a'), stage: 0, phase: 'Platz', label: platz(p), a: seed(1), b: seed(2) }];
+    }
+
+    // Three teams play each other; every pair shares a team with the next, so
+    // the three matches cannot overlap. §5.5 settles the order afterwards on
+    // points, difference and the head-to-head result.
+    if (size === 3) {
+      const label = runde(p, p + 2);
+      return [
+        { key: key('r1'), stage: 0, phase: 'Platz', label, a: seed(1), b: seed(2) },
+        { key: key('r2'), stage: 1, phase: 'Platz', label, a: seed(3), b: seed(1) },
+        { key: key('r3'), stage: 2, phase: 'Platz', label, a: seed(2), b: seed(3) },
+      ];
+    }
+
+    if (size === 4 || size === 5) {
+      const label = runde(p, p + 3);
+      const out = [
+        { key: key('s1'), stage: 0, phase: 'Platz', label, a: seed(1), b: seed(4) },
+        { key: key('s2'), stage: 0, phase: 'Platz', label, a: seed(2), b: seed(3) },
+        { key: key('win'), stage: 1, phase: 'Platz', label: platz(p),
+          a: fromWinner(key('s1')), b: fromWinner(key('s2')) },
+        { key: key('lose'), stage: 1, phase: 'Platz', label: platz(p + 2),
+          a: fromLoser(key('s1')), b: fromLoser(key('s2')) },
+      ];
+      // §5.5: the fifth team plays the bracket's fourth for the last two places.
+      if (size === 5) {
+        out.push({ key: key('last'), stage: 2, phase: 'Platz', label: platz(p + 3),
+          a: seed(5), b: fromLoser(key('lose')) });
+      }
+      return out;
+    }
+
+    if (size === 8) {
+      const quarters = [[1, 8], [4, 5], [2, 7], [3, 6]].map((pair, i) => ({
+        key: key('vf' + (i + 1)), stage: 0, phase: 'VF', label: `Viertelfinale ${i + 1}`,
+        a: seed(pair[0]), b: seed(pair[1]),
+      }));
+      const lower = runde(p + 4, p + 7);
+      return quarters.concat([
+        { key: key('c1'), stage: 1, phase: 'Platz', label: lower,
+          a: fromLoser(key('vf1')), b: fromLoser(key('vf2')) },
+        { key: key('c2'), stage: 1, phase: 'Platz', label: lower,
+          a: fromLoser(key('vf3')), b: fromLoser(key('vf4')) },
+        { key: key('hf1'), stage: 1, phase: 'HF', label: 'Halbfinale 1', solo: true,
+          a: fromWinner(key('vf1')), b: fromWinner(key('vf2')) },
+        { key: key('hf2'), stage: 1, phase: 'HF', label: 'Halbfinale 2', solo: true,
+          a: fromWinner(key('vf3')), b: fromWinner(key('vf4')) },
+        { key: key('p5'), stage: 2, phase: 'Platz', label: platz(p + 4),
+          a: fromWinner(key('c1')), b: fromWinner(key('c2')) },
+        { key: key('p7'), stage: 2, phase: 'Platz', label: platz(p + 6),
+          a: fromLoser(key('c1')), b: fromLoser(key('c2')) },
+        { key: key('p3'), stage: 2, phase: 'Platz', label: platz(p + 2), solo: true,
+          a: fromLoser(key('hf1')), b: fromLoser(key('hf2')) },
+        { key: key('final'), stage: 2, phase: 'Finale', label: 'Finale', solo: true,
+          a: fromWinner(key('hf1')), b: fromWinner(key('hf2')) },
+      ]);
+    }
+
+    return [];   // no bracket for this size; allocation() reports it
+  }
+
+  /**
+   * §5.6: the endrunde packed onto courts.
+   *
+   * Lower buckets first — the last places are decided early so those teams can
+   * go home. Within a bucket the dependencies do the ordering: a match waits
+   * until both of its sources have been played in an earlier round.
+   *
+   * The two semi-finals, the third-place match and the final are alone on court
+   * 1. They are taken only once nothing else can fill a court, which is what
+   * puts the final at the end of the day rather than in the middle of it.
+   */
+  function packEndrunde(specs, courts) {
+    const byKey = new Map(specs.map(s => [s.key, s]));
+    const sourcesOf = s => [sourceKey(s.a), sourceKey(s.b)].filter(Boolean);
+
+    /*
+     * How many matches still have to follow this one before its bucket is
+     * settled. A quarter-final carries three (5–8 round, then the fifth-place
+     * match; or semi-final, then the final), a lone placement match none.
+     *
+     * This has to outrank "lower buckets first", or the deepest bracket starts
+     * last and its chain runs on alone at the end of the day with the courts
+     * beside it empty. Depth first and lower-buckets-among-equals is what puts
+     * a quarter-final on court 1 while the placement matches fill the rest —
+     * which is what the 2026 schedule does.
+     */
+    const depth = new Map();
+    const depthOf = key => {
+      if (depth.has(key)) return depth.get(key);
+      depth.set(key, 0);   // guards against a cycle rather than recursing forever
+      const below = specs
+        .filter(s => sourcesOf(s).indexOf(key) >= 0)
+        .map(s => 1 + depthOf(s.key));
+      const value = below.length ? Math.max(...below) : 0;
+      depth.set(key, value);
+      return value;
+    };
+    for (const s of specs) s.depth = depthOf(s.key);
+
+    const round = new Map();
+    const waiting = new Set(specs.map(s => s.key));
+    const plan = [];
+
+    /*
+     * Two orders, because §5.6 wants two things at once.
+     *
+     * `byPlace` is the rule as written: lower buckets play first, so the teams
+     * whose day is over can go home. `byDepth` is what keeps that from
+     * backfiring — run purely by place, the eight-team bracket starts last and
+     * then its chain of quarter-final → 5–8 round → fifth-place match runs on
+     * alone at the end of the day with the courts beside it empty, which costs
+     * a round nobody gets back.
+     *
+     * So each round admits one match from the deepest chain and fills the rest
+     * by place. That is the shape of the 2026 endrunde: a quarter-final on
+     * court 1, placement matches on the courts beside it.
+     */
+    const byDepth = (x, y) => y.depth - x.depth || y.firstPlace - x.firstPlace || x.seq - y.seq;
+    const byPlace = (x, y) => y.firstPlace - x.firstPlace || x.stage - y.stage || x.seq - y.seq;
+
+    while (waiting.size) {
+      const at = plan.length + 1;
+      const ready = [...waiting]
+        .map(k => byKey.get(k))
+        .filter(s => sourcesOf(s).every(src => round.has(src) && round.get(src) < at));
+
+      const chosen = [];
+      const used = new Set();
+      const take = s => {
+        if (s.solo || chosen.length >= courts) return;
+        const slots = [slotId(s.a), slotId(s.b)];
+        if (slots.some(x => used.has(x))) return;
+        slots.forEach(x => used.add(x));
+        chosen.push(s);
+      };
+
+      const deepest = ready.filter(s => !s.solo).sort(byDepth)[0];
+      if (deepest && deepest.depth > 0) take(deepest);
+      for (const s of ready.slice().sort(byPlace)) take(s);
+
+      if (!chosen.length) {
+        const alone = ready.sort(byPlace).find(s => s.solo);
+        if (alone) chosen.push(alone);
+      }
+
+      // Cannot happen: the bracket graphs are acyclic, so something is always
+      // ready. Bailing out beats spinning forever if that is ever wrong.
+      if (!chosen.length) break;
+
+      for (const s of chosen) { waiting.delete(s.key); round.set(s.key, at); }
+      plan.push(chosen);
+    }
+
+    return plan;
+  }
+
+  /**
+   * §10 step 6: the whole endrunde, from grouped teams to numbered matches.
+   *
+   * `fromRound` and `fromNr` continue an existing schedule — the group phase
+   * ends, and the endrunde picks up at the next round and the next number.
+   *
+   * Entry slots are `B:` refs (§6.3) rather than `G:` refs. Both would resolve
+   * to the same team, but `B:` says what the slot *is* — the bucket's fourth —
+   * and that survives the singleton merge, where the fifth entry of a bucket is
+   * a sixth-placed team and no single `G:` form describes the seeding.
+   */
+  function endPhase(teams, config) {
+    const options = config || {};
+    const courts = Math.max(1, Number(options.courts) || 0);
+    const fromRound = Number(options.fromRound) || 0;
+    const fromNr = Number(options.fromNr) || 0;
+
+    const counts = new Map();
+    for (const t of teams || []) {
+      if (!t || !t.group) continue;
+      counts.set(t.group, (counts.get(t.group) || 0) + 1);
+    }
+    const sizes = [...counts.keys()].sort().map(group => ({ group, size: counts.get(group) }));
+    const list = buckets(sizes);
+    if (!list.length) return { matches: [], rounds: 0, buckets: [] };
+
+    // `seq` is the order the bracket declares its matches in, and it is the
+    // last word on ties — the third-place match is declared before the final,
+    // so the final stays the last match of the day (§5.6).
+    const specs = [];
+    for (const b of list) {
+      bracketFor(b).forEach((spec, i) => {
+        specs.push(Object.assign({ firstPlace: b.firstPlace, seq: i }, spec));
+      });
+    }
+
+    const plan = packEndrunde(specs, courts);
+
+    const nrOf = new Map();
+    let nr = fromNr;
+    for (const round of plan) for (const s of round) nrOf.set(s.key, ++nr);
+
+    const refOf = side => (side.kind === 'seed' ? side.ref : `${side.kind}:${nrOf.get(side.key)}`);
+
+    const matches = [];
+    plan.forEach((round, i) => {
+      round.forEach((s, court) => {
+        matches.push({
+          nr: nrOf.get(s.key),
+          round: fromRound + i + 1,
+          court: court + 1,
+          phase: s.phase,
+          label: s.label,
+          aRef: refOf(s.a),
+          bRef: refOf(s.b),
+          aTeam: null,
+          bTeam: null,
+          sa: null,
+          sb: null,
+          status: 'open',
+          wo: null,
+          doneAt: '',
+        });
+      });
+    });
+
+    return { matches, rounds: plan.length, buckets: list };
+  }
+
+  /**
+   * The whole tournament: the group phase of §5.3 followed by the endrunde of
+   * §5.5, numbered and rounded end to end.
+   *
+   * Nothing here validates the result. conflicts() is where that happens, and
+   * the caller is expected to run it before writing anything to the sheet.
+   */
+  function schedule(teams, config) {
+    const group = groupPhase(teams, config);
+    const end = endPhase(teams, Object.assign({}, config, {
+      fromRound: group.rounds,
+      fromNr: group.matches.length,
+    }));
+    return {
+      matches: group.matches.concat(end.matches),
+      rounds: group.rounds + end.rounds,
+      groupRounds: group.rounds,
+      endRounds: end.rounds,
+      buckets: end.buckets,
+      seed: group.seed,
+      missedBreaks: group.missedBreaks,
+    };
+  }
+
   // ------------------------------------------------------------------ main
 
   function conflicts(matches, teams, config) {
@@ -1059,7 +1379,7 @@ const TournamentEngine = (() => {
   return {
     conflicts, standings, timeline, currentRound,
     allocation, groupSizes, buckets, plannedFinish,
-    draw, groupPhase, circleMethod,
+    draw, groupPhase, circleMethod, endPhase, schedule,
     parseRef, errors, warnings, surnameOf, walkoverScore,
     toMinutes, hhmm,
   };

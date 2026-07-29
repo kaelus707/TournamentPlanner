@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>endPhase() — Tests</title>
+<style>
+  :root { --ok:#1a7f37; --bad:#c0392b; --warn:#9a6700; --line:#d8dee4; --bg:#fff; --fg:#1f2328; --muted:#59636e; --zebra:#f6f8fa; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ok:#3fb950; --bad:#f85149; --warn:#d29922; --line:#30363d; --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --zebra:#161b22; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  h1 { font-size:19px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .banner { padding:12px 14px; border-radius:8px; font-weight:600; margin-bottom:16px; color:#fff; }
+  .banner.ok { background:var(--ok); }
+  .banner.bad { background:var(--bad); }
+  .load { border:1px dashed var(--line); border-radius:8px; padding:20px; text-align:center; color:var(--muted); }
+  .load.over { border-color:var(--ok); }
+  .row { display:flex; gap:10px; padding:9px 0; border-top:1px solid var(--line); align-items:baseline; }
+  .tag { flex:none; font-size:11px; font-weight:700; letter-spacing:.03em;
+         padding:2px 6px; border-radius:4px; color:#fff; }
+  .tag.ok { background:var(--ok); }
+  .tag.bad { background:var(--bad); }
+  .name { font-weight:500; }
+  .detail { display:block; color:var(--muted); font-size:13px; margin-top:2px; }
+  .row.bad .detail { color:var(--bad); }
+  h2 { font-size:15px; margin:26px 0 6px; }
+  .facts { display:flex; flex-wrap:wrap; gap:6px 18px; color:var(--muted); font-size:13px; margin-bottom:8px; }
+  .facts b { color:var(--fg); }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; font-size:13px; width:100%; min-width:520px; }
+  th { text-align:left; color:var(--muted); font-weight:600; padding:4px 6px; border-bottom:1px solid var(--line); }
+  td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  th:first-child, td:first-child { text-align:right; }
+  tbody tr:nth-child(odd) { background:var(--zebra); }
+  tr.alone td { font-weight:700; }
+  .ref { color:var(--muted); }
+  .VF { color:#0969da; } .HF { color:#8250df; } .Finale { color:#bc4c00; }
+  @media (prefers-color-scheme: dark) {
+    .VF { color:#79c0ff; } .HF { color:#d2a8ff; } .Finale { color:#ffa657; }
+  }
+</style>
+</head>
+<body>
+
+<h1>endPhase() — Tests</h1>
+<div class="sub">SPEC §5.5, §5.6 und §6.3, geprüft gegen die Endrunde des Bonsai Cup 2026 (SPEC §11).</div>
+
+<div id="load" class="load">Fixture wird geladen …</div>
+
+<div id="out"></div>
+
+<script src="../engine.js"></script>
+<script src="fixture-adapter.js"></script>
+<script src="endphase.test.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+/*
+ * Same loading dance as the other test pages: opened straight from disk,
+ * fetch() is blocked by the file:// origin rule, so the page falls back to
+ * letting the organizer hand the two CSVs over.
+ */
+async function fromFetch() {
+  const [w, t] = await Promise.all([
+    fetch('fixtures/bc2026-web.csv', { cache: 'no-store' }),
+    fetch('fixtures/bc2026-teams.csv', { cache: 'no-store' }),
+  ]);
+  if (!w.ok || !t.ok) throw new Error('Fixture nicht erreichbar');
+  return { web: await w.text(), teams: await t.text() };
+}
+
+function askForFiles() {
+  const box = $('#load');
+  box.textContent = '';
+  box.append(
+    el('div', null, 'Die Fixture-Dateien konnten nicht automatisch geladen werden (file://).'),
+    el('div', null, 'Beide CSV-Dateien aus test/fixtures hierher ziehen oder auswählen:')
+  );
+
+  const input = el('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = '.csv';
+  input.style.marginTop = '10px';
+  box.append(input);
+
+  const status = el('div');
+  status.style.marginTop = '8px';
+  box.append(status);
+
+  // Kept outside take() so the two files may also arrive one at a time.
+  const picked = {};
+
+  const take = files => {
+    let pending = files.length;
+    if (!pending) return;
+    for (const f of files) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        picked[/team/i.test(f.name) ? 'teams' : 'web'] = reader.result;
+        if (--pending > 0) return;
+        if (picked.web && picked.teams) start(picked);
+        else status.textContent = 'Es fehlt noch ' + (picked.web ? 'bc2026-teams.csv' : 'bc2026-web.csv') + '.';
+      };
+      reader.readAsText(f, 'utf-8');
+    }
+  };
+
+  input.addEventListener('change', () => take(input.files));
+  ['dragenter', 'dragover'].forEach(e =>
+    box.addEventListener(e, ev => { ev.preventDefault(); box.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(e =>
+    box.addEventListener(e, () => box.classList.remove('over')));
+  box.addEventListener('drop', ev => { ev.preventDefault(); take(ev.dataTransfer.files); });
+}
+
+/** The generated endrunde, one line per round. */
+function planTable(rounds) {
+  const table = el('table');
+  const head = el('tr');
+  head.append(el('th', null, 'Runde'), el('th', null, 'Spiele'));
+  const thead = el('thead');
+  thead.append(head);
+  table.append(thead);
+
+  const body = el('tbody');
+  for (const entry of rounds) {
+    const ms = entry[1].slice().sort((a, b) => a.court - b.court);
+    const tr = el('tr', ms.length === 1 ? 'alone' : null);
+    tr.append(el('td', null, String(entry[0])));
+    const cell = el('td');
+    ms.forEach((m, i) => {
+      if (i) cell.append(el('span', null, '  ·  '));
+      cell.append(el('span', m.phase, `${m.court}: ${m.label} `));
+      cell.append(el('span', 'ref', `(${m.aRef} / ${m.bRef})`));
+    });
+    tr.append(cell);
+    body.append(tr);
+  }
+  table.append(body);
+
+  const wrap = el('div', 'scroll');
+  wrap.append(table);
+  return wrap;
+}
+
+/** The buckets: which places each decides, and out of whose group positions. */
+function bucketTable(list) {
+  const table = el('table');
+  const head = el('tr');
+  for (const t of ['Topf', 'Plätze', 'Teams', 'Spiele', 'Besetzung']) head.append(el('th', null, t));
+  const thead = el('thead');
+  thead.append(head);
+  table.append(thead);
+
+  const body = el('tbody');
+  for (const b of list) {
+    const tr = el('tr');
+    tr.append(el('td', null, 'B:' + b.id));
+    tr.append(el('td', null, `${b.firstPlace}–${b.lastPlace}`));
+    tr.append(el('td', null, String(b.size)));
+    tr.append(el('td', null, String(b.matches)));
+    tr.append(el('td', null, b.members.map(m => `${m.rank}. Gr. ${m.group}`).join(', ')));
+    body.append(tr);
+  }
+  table.append(body);
+
+  const wrap = el('div', 'scroll');
+  wrap.append(table);
+  return wrap;
+}
+
+function render({ results, summary }) {
+  $('#load').style.display = 'none';
+  const out = $('#out');
+  out.textContent = '';
+
+  const failed = results.filter(r => !r.pass).length;
+  out.append(el('div', 'banner ' + (failed ? 'bad' : 'ok'),
+    failed ? `${failed} von ${results.length} Tests fehlgeschlagen`
+           : `Alle ${results.length} Tests bestanden`));
+
+  const facts = el('div', 'facts');
+  const fact = (k, v) => {
+    const s = el('span', null, k + ' ');
+    s.append(el('b', null, String(v)));
+    return s;
+  };
+  facts.append(
+    fact('Endrundenspiele', summary.end.matches.length),
+    fact('Runden', summary.end.rounds),
+    fact('Töpfe', summary.end.buckets.length),
+    fact('ganzes Turnier', summary.whole ? summary.whole.matches.length + ' Spiele' : '—')
+  );
+  out.append(facts);
+
+  for (const r of results) {
+    const row = el('div', 'row ' + (r.pass ? 'ok' : 'bad'));
+    row.append(el('span', 'tag ' + (r.pass ? 'ok' : 'bad'), r.pass ? 'OK' : 'FEHL'));
+    const body = el('div');
+    body.append(el('span', 'name', r.name));
+    if (r.detail) body.append(el('span', 'detail', r.detail));
+    row.append(body);
+    out.append(row);
+  }
+
+  out.append(el('h2', null, 'Die Töpfe von 2026'));
+  out.append(el('div', 'sub',
+    'Jeder Topf entscheidet seinen eigenen Platzbereich. Die Besetzung ist die ' +
+    'Setzung hinter den B:-Referenzen — nach Rang, dann nach Gruppe.'));
+  out.append(bucketTable(summary.end.buckets));
+
+  out.append(el('h2', null, 'Die erzeugte Endrunde 2026 — 3 Plätze, ab Runde 21'));
+  out.append(el('div', 'sub',
+    'Ein Viertelfinale auf Platz 1, Platzierungsspiele daneben. Fett gesetzt sind ' +
+    'die Runden mit einem einzigen Spiel: die beiden Halbfinale, das Spiel um ' +
+    'Platz 3 und das Finale stehen nach §5.6 allein auf Platz 1.'));
+  out.append(planTable(summary.rounds));
+}
+
+function start(texts) {
+  try {
+    render(EndPhaseTests.run(texts.web, texts.teams));
+  } catch (err) {
+    $('#load').style.display = '';
+    $('#load').textContent = 'Tests konnten nicht ausgeführt werden: ' + err.message;
+    console.error(err);
+  }
+}
+
+fromFetch().then(start).catch(askForFiles);
+</script>
+</body>
+</html>
