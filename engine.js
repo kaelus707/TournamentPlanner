@@ -5,10 +5,16 @@
  * standings(matches, teams, config)  the group tables of §5.4
  * timeline(matches, config)          the timing model of §6.1
  * allocation({ teams, courts, … })   the duration preview of §5.2
+ * schedule(teams, config)            the whole plan of §5.3 and §5.5
+ * resolve(matches, teams, config)    the reference resolution of §6.3
+ * placement(matches, teams, config)  the final table of §8
+ * delayPlan(matches, teams, cfg, nr) the move proposal of §6.2
  *
- * All four are pure: they read their inputs, mutate nothing, and return plain
- * data. None of them decides anything — the caller shows the result, blocks on
- * errors and may override warnings.
+ * All of them are pure: they read their inputs, mutate nothing, and return
+ * plain data. None of them decides anything — the caller shows the result,
+ * blocks on errors and may override warnings. enterResult() and applyMove()
+ * are the two that change something, and they too return a new array rather
+ * than touching the one they were given.
  *
  * Loads as a plain <script> in the browser; also requireable from Node so the
  * same code can be exercised from a terminal. No build step either way.
@@ -1354,6 +1360,456 @@ const TournamentEngine = (() => {
     };
   }
 
+  // ------------------------------------------------------------- resolution
+
+  /** Group letter and team count per group, as buckets() wants them. */
+  function bucketSizes(teamIdx) {
+    const counts = new Map();
+    for (const t of teamIdx.values()) {
+      if (!t.group) continue;
+      counts.set(t.group, (counts.get(t.group) || 0) + 1);
+    }
+    return [...counts.keys()].sort().map(group => ({ group, size: counts.get(group) }));
+  }
+
+  /**
+   * Which group letters have a final table: every one of their group matches
+   * carries a result. A group with no matches at all counts as final —
+   * vacuously true, and the alternative would be to block an endrunde forever
+   * on a group that never plays.
+   */
+  function finishedGroups(matches, teams, wo) {
+    const done = new Set();
+    for (const t of teams.values()) if (t.group) done.add(t.group);
+    for (const m of matches) {
+      if (m.phase !== 'Gruppe') continue;
+      const g = groupOfMatch(m, teams);
+      if (g && !resultOf(m, wo)) done.delete(g);
+    }
+    return done;
+  }
+
+  /**
+   * `B:<id>:<n>` -> the group position that seat holds (§5.5).
+   *
+   * The seeding is the bucket's member order — by rank, then by group letter —
+   * which is what buckets() already builds. So B:5:5 in a merged bucket is
+   * "6th of group A", arrived at without comparing points across groups.
+   */
+  function bucketSeats(teamIdx) {
+    const seats = new Map();
+    for (const b of buckets(bucketSizes(teamIdx))) {
+      b.members.forEach((seat, i) => seats.set(`${b.id}:${i + 1}`, seat));
+    }
+    return seats;
+  }
+
+  /**
+   * The team on one side of a decided match. Null when the match has no result,
+   * when its own sides are not resolved yet, or when it ended level: a draw
+   * decides no winner, and a knockout match carrying one is a data problem, not
+   * a reason to guess.
+   */
+  function outcome(m, want, wo) {
+    const r = resultOf(m, wo);
+    if (!r || r[0] === r[1]) return null;
+    return ((want === 'W') === (r[0] > r[1])) ? (m.aTeam || null) : (m.bTeam || null);
+  }
+
+  /**
+   * §6.3: aTeam / bTeam filled in from the refs, top to bottom. Returns a new
+   * array in the order it was given; nothing is mutated.
+   *
+   * Walking in `nr` order is enough because a ref always points at an earlier
+   * match — §7 makes anything else an error — so a source is resolved before
+   * anything reads it.
+   *
+   * **A derived ref is recomputed, null included.** §6.3 says resolution fills
+   * a slot "where the source is decided", which read strictly would leave an
+   * undecided slot untouched. That is not what should happen: an organizer who
+   * deletes a mis-tapped quarter-final result needs the semi-final to go back
+   * to reading "Sieger Viertelfinale 1", and a stale team name standing on the
+   * next court is exactly the failure the round screen exists to prevent.
+   *
+   * A slot with no ref, or one the grammar cannot read, is left exactly as it
+   * is. Both are for conflicts() to report, and neither is a licence to erase
+   * something a person typed into the sheet by hand.
+   */
+  function resolve(matches, teams, config) {
+    const out = (matches || []).map(m => Object.assign({}, m));
+    const order = [...out].sort((a, b) => (a.nr || 0) - (b.nr || 0));
+    const byNr = new Map(order.map(m => [m.nr, m]));
+
+    const teamIdx = indexTeams(teams);
+    const wo = walkoverScore(config);
+    const finished = finishedGroups(order, teamIdx, wo);
+    const seats = bucketSeats(teamIdx);
+
+    // A bucket draws from every group that reaches its rank, and the match does
+    // not say which groups those are — so a B: ref waits for all of them. Same
+    // strict reading §7 takes for the ordering check.
+    const groupPhaseOver = [...teamIdx.values()].every(t => !t.group || finished.has(t.group));
+
+    const table = new Map();
+    for (const row of standings(order, teams, config)) table.set(`${row.group}:${row.rank}`, row.id);
+
+    // undefined means "not this function's business"; null means "not decided".
+    const sideOf = raw => {
+      const ref = parseRef(raw);
+      if (ref.kind === 'T') return ref.team;
+      if (ref.kind === 'G') {
+        return finished.has(ref.group) ? (table.get(`${ref.group}:${ref.rank}`) || null) : null;
+      }
+      if (ref.kind === 'W' || ref.kind === 'L') {
+        const src = byNr.get(ref.src);
+        return src ? outcome(src, ref.kind, wo) : null;
+      }
+      if (ref.kind === 'B') {
+        if (!groupPhaseOver) return null;
+        const seat = seats.get(`${ref.bucket}:${ref.rank}`);
+        return seat ? (table.get(`${seat.group}:${seat.rank}`) || null) : null;
+      }
+      return undefined;
+    };
+
+    for (const m of order) {
+      const a = sideOf(m.aRef);
+      const b = sideOf(m.bRef);
+      if (a !== undefined) m.aTeam = a;
+      if (b !== undefined) m.bTeam = b;
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------- placement
+
+  const PLACE_LABEL = /^Spiel um Platz (\d+)$/;
+
+  /**
+   * §5.5: three teams play each other, ordered by points, then goal difference,
+   * then the head-to-head result — which among three teams is simply the match
+   * between the two that are level.
+   *
+   * The id compare behind it is the fifth step standings() needs for the same
+   * reason: without it the same tournament would order two identical rows
+   * differently on a reload.
+   */
+  function roundRobinOrder(ids, ms, wo) {
+    const rows = new Map(ids.map(id => [id, { id, pkt: 0, diff: 0 }]));
+    const beat = new Set();
+
+    for (const m of ms) {
+      const r = resultOf(m, wo);
+      const a = rows.get(m.aTeam), b = rows.get(m.bTeam);
+      if (!r || !a || !b) continue;
+      a.diff += r[0] - r[1];
+      b.diff += r[1] - r[0];
+      if (r[0] > r[1]) { a.pkt += WIN; beat.add(`${a.id}|${b.id}`); }
+      else if (r[0] < r[1]) { b.pkt += WIN; beat.add(`${b.id}|${a.id}`); }
+      else { a.pkt += DRAW; b.pkt += DRAW; }
+    }
+
+    return [...rows.values()].sort((x, y) =>
+      y.pkt - x.pkt
+      || y.diff - x.diff
+      || (beat.has(`${x.id}|${y.id}`) ? -1 : beat.has(`${y.id}|${x.id}`) ? 1 : 0)
+      || String(x.id).localeCompare(String(y.id))
+    ).map(r => r.id);
+  }
+
+  /** The matches of one bucket, found by their B: refs. */
+  function bucketMatches(ms, id) {
+    const mine = ref => {
+      const p = parseRef(ref);
+      return p.kind === 'B' && p.bucket === id;
+    };
+    return ms.filter(m => mine(m.aRef) || mine(m.bRef));
+  }
+
+  /**
+   * §8: one E row per place, ascending.
+   *
+   * Every place this format produces is decided by a named match — the final
+   * settles 1 and 2, "Spiel um Platz N" settles N and N+1 — which is exactly
+   * what the 2026 sheet wrote into its origin column. A bucket of three is the
+   * one exception: it has no deciding match, so §5.5's round robin supplies the
+   * order instead.
+   *
+   * A place whose match is not played yet is still listed, with `team: null`.
+   * The origin says what will decide it, which is what lets the viewer show a
+   * placement table before the tournament ends.
+   */
+  function placement(matches, teams, config) {
+    const ms = resolve(matches, teams, config).sort((a, b) => (a.nr || 0) - (b.nr || 0));
+    const teamIdx = indexTeams(teams);
+    const wo = walkoverScore(config);
+
+    const rows = new Map();
+    const put = (place, team, origin) => rows.set(place, {
+      place,
+      team: team || null,
+      group: (team && teamIdx.get(team) && teamIdx.get(team).group) || '',
+      origin,
+    });
+
+    for (const m of ms) {
+      const hit = PLACE_LABEL.exec(m.label || '');
+      const first = m.label === 'Finale' ? 1 : hit ? +hit[1] : null;
+      if (first == null) continue;
+      put(first, outcome(m, 'W', wo), `Sieger ${m.label}`);
+      put(first + 1, outcome(m, 'L', wo), `Verlierer ${m.label}`);
+    }
+
+    for (const b of buckets(bucketSizes(teamIdx))) {
+      if (b.size !== 3) continue;
+      const mine = bucketMatches(ms, b.id);
+      const ids = [1, 2, 3].map(n => {
+        const ref = `B:${b.id}:${n}`;
+        const on = mine.find(m => m.aRef === ref || m.bRef === ref);
+        return on ? (on.aRef === ref ? on.aTeam : on.bTeam) : null;
+      });
+      const settled = mine.length === 3 && ids.every(Boolean) && mine.every(m => resultOf(m, wo));
+      const order = settled ? roundRobinOrder(ids, mine, wo) : [null, null, null];
+      const label = mine.length ? mine[0].label : `Plätze ${b.firstPlace}–${b.lastPlace}`;
+      order.forEach((id, i) => put(b.firstPlace + i, id, `${i + 1}. ${label}`));
+    }
+
+    return [...rows.values()].sort((a, b) => a.place - b.place);
+  }
+
+  // ------------------------------------------------------ delay and promote
+
+  /*
+   * §6.2's weights, in one place so they can be argued about in one place.
+   *
+   * `playedPrevious` is an order of magnitude above everything else on purpose:
+   * calling a team back onto court that just came off it is the one suggestion
+   * the admin should never have to notice and reject. The rest are nudges —
+   * near before far, and a small preference for keeping a group together and a
+   * court where it already was, because both make the change easy to announce.
+   */
+  const PROMOTE = { distance: -4, playedPrevious: -1000, sameGroup: 3, sameCourt: 2 };
+
+  const teamsOf = m => [m.aTeam, m.bTeam].filter(Boolean);
+  const inRound = (ms, round) => ms.filter(m => m.round === round);
+
+  /** Team ids playing in `round`, ignoring the match being moved out of it. */
+  function busyIn(ms, round, exceptNr) {
+    const busy = new Set();
+    for (const m of ms) {
+      if (m.round !== round || m.nr === exceptNr) continue;
+      for (const id of teamsOf(m)) busy.add(id);
+    }
+    return busy;
+  }
+
+  /** The lowest court number free in `round`. */
+  function freeCourt(ms, round, exceptNr) {
+    const taken = new Set(inRound(ms, round).filter(m => m.nr !== exceptNr).map(m => m.court));
+    let court = 1;
+    while (taken.has(court)) court++;
+    return court;
+  }
+
+  /**
+   * The last round a match may be moved to — §7 read backwards.
+   *
+   * Two things bound it. A W:/L: successor must still come after it. And a
+   * *group* match is bounded by the whole endrunde: every G: ref waits for that
+   * group's table and every B: ref waits for all four, so pushing one group
+   * match past them does not break one rule, it breaks every endrunde match at
+   * once.
+   */
+  function delayLimit(ms, teamIdx, match) {
+    const last = Math.max(0, ...ms.map(m => m.round || 0));
+    const group = match.phase === 'Gruppe' ? groupOfMatch(match, teamIdx) : null;
+
+    let limit = last + 1;
+    const bound = round => { if (round != null) limit = Math.min(limit, round - 1); };
+
+    for (const m of ms) {
+      for (const raw of [m.aRef, m.bRef]) {
+        const ref = parseRef(raw);
+        if ((ref.kind === 'W' || ref.kind === 'L') && ref.src === match.nr) bound(m.round);
+        else if (group && ref.kind === 'G' && ref.group === group) bound(m.round);
+        else if (group && ref.kind === 'B') bound(m.round);
+      }
+    }
+    return limit;
+  }
+
+  /** Can `match` stand in `round` once `leaving` has gone from it? */
+  function fits(ms, config, match, round, leaving) {
+    const courts = Math.max(1, Number(config && config.courts) || 1);
+    const others = ms.filter(m => m.round === round && m.nr !== match.nr && m.nr !== leaving);
+    if (others.length >= courts) return false;
+
+    const busy = new Set();
+    for (const m of others) for (const id of teamsOf(m)) busy.add(id);
+    return !teamsOf(match).some(id => busy.has(id));
+  }
+
+  /**
+   * §6.2: the earliest future round in which both teams are free and the move
+   * creates no conflict — a free court, and still inside delayLimit().
+   *
+   * Null when no such round exists, and on a packed schedule that is the normal
+   * answer: 98 group matches on five courts leave two free slots in twenty
+   * rounds. It is not a dead end, it is what makes the promote half of §6.2
+   * load-bearing — the room for the delayed match is the room the promoted one
+   * vacates. Each candidate therefore carries its own target, and this is only
+   * the answer to "move it and leave the court empty".
+   */
+  function delayTarget(ms, teamIdx, config, match) {
+    const limit = delayLimit(ms, teamIdx, match);
+    for (let round = match.round + 1; round <= limit; round++) {
+      if (fits(ms, config, match, round, null)) return round;
+    }
+    return null;
+  }
+
+  /**
+   * §6.2: what could be pulled forward into the court the delayed match frees.
+   *
+   * A candidate comes from a later round, has both teams known, and none of its
+   * four players is already on court in the current round. Everything after
+   * that is preference — and the reasons travel with the score, because a
+   * suggestion the admin cannot explain to the players is one they will not
+   * take.
+   */
+  function promoteCandidates(ms, teams, config, match) {
+    const round = match.round;
+    const busy = busyIn(ms, round, match.nr);
+    const before = busyIn(ms, round - 1, null);
+    const teamIdx = indexTeams(teams);
+    const group = groupOfMatch(match, teamIdx);
+
+    const out = [];
+    for (const m of ms) {
+      if (m.nr === match.nr || m.round == null || m.round <= round) continue;
+      const ids = teamsOf(m);
+      if (ids.length < 2 || ids.some(id => busy.has(id))) continue;
+
+      const distance = m.round - round;
+      const rested = !ids.some(id => before.has(id));
+      const sameGroup = !!group && groupOfMatch(m, teamIdx) === group;
+      const sameCourt = m.court === match.court;
+
+      const reasons = [distance === 1 ? 'aus der nächsten Runde' : `${distance} Runden später`];
+      if (!rested) reasons.push('ein Team hat gerade gespielt');
+      if (sameGroup) reasons.push(`gleiche Gruppe (${group})`);
+      if (sameCourt) reasons.push(`schon auf Platz ${m.court}`);
+
+      out.push({
+        nr: m.nr,
+        round: m.round,
+        court: m.court,
+        rested,
+        score: distance * PROMOTE.distance
+             + (rested ? 0 : PROMOTE.playedPrevious)
+             + (sameGroup ? PROMOTE.sameGroup : 0)
+             + (sameCourt ? PROMOTE.sameCourt : 0),
+        reasons,
+      });
+    }
+    return out.sort((a, b) => b.score - a.score || a.nr - b.nr);
+  }
+
+  /**
+   * §6.2: everything the screen needs to offer the move, and nothing applied.
+   *
+   * `target` is the plain delay — move it, leave the court empty. Each
+   * candidate carries its own `target` instead, the round it vacates, because
+   * the two halves of §6.2 are one move on a full schedule: the delayed match
+   * goes where the promoted one came from. A candidate whose swap would not be
+   * legal is not offered at all.
+   *
+   * `top` is the three §6.2 asks for, which is also what fits under a thumb;
+   * `candidates` carries the rest for a screen that wants to show more.
+   */
+  function delayPlan(matches, teams, config, nr) {
+    const ms = [...(matches || [])].sort((a, b) => (a.nr || 0) - (b.nr || 0));
+    const match = ms.find(m => m.nr === nr);
+    if (!match || match.round == null) return null;
+
+    const teamIdx = indexTeams(teams);
+    const limit = delayLimit(ms, teamIdx, match);
+    const candidates = promoteCandidates(ms, teams, config, match)
+      .filter(c => c.round <= limit && fits(ms, config, match, c.round, c.nr))
+      .map(c => Object.assign({ target: c.round }, c));
+
+    return {
+      nr,
+      round: match.round,
+      court: match.court,
+      target: delayTarget(ms, teamIdx, config, match),
+      top: candidates.slice(0, 3),
+      candidates,
+    };
+  }
+
+  /**
+   * The move of §6.2, applied: the promoted match takes the court that just
+   * came free, and the delayed one takes a free court in its new round.
+   *
+   * The promotion is moved first on purpose. When the two swap rounds — the
+   * normal case on a full schedule — that leaves exactly the court the promoted
+   * match vacated, so the two trade places instead of leaving a hole on one
+   * side and crowding the other.
+   *
+   * Nothing here validates. conflicts() is the safety net, and §7 says it runs
+   * before any move is applied — so the caller runs it over the result and
+   * throws this array away if it comes back with errors.
+   */
+  function applyMove(matches, config, move) {
+    const plan = move || {};
+    const out = (matches || []).map(m => Object.assign({}, m));
+    const delayed = out.find(m => m.nr === plan.nr);
+    if (!delayed || !(plan.toRound > 0)) return out;
+
+    const promoted = plan.promote == null ? null : out.find(m => m.nr === plan.promote);
+    if (promoted) {
+      promoted.round = delayed.round;
+      promoted.court = delayed.court;
+    }
+
+    delayed.round = plan.toRound;
+    delayed.court = freeCourt(out, plan.toRound, delayed.nr);
+    return out;
+  }
+
+  // ----------------------------------------------------------- result entry
+
+  const STATUS = ['open', 'playing', 'done'];
+
+  /** A score cell: a number, or null for "nothing entered". */
+  const score = v => (v === '' || v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+
+  /**
+   * §9.2: one match's result replaced, then §6.3 run over the whole schedule —
+   * "resolution runs after every result entry", which is what puts the winner's
+   * name on the next court.
+   *
+   * `doneAt` is passed in, never read off a clock: the engine stays pure, and
+   * the stamp stays the observation §3.3 describes rather than something the
+   * engine invents. An empty stamp on a finished match is allowed — §3.3 says
+   * it is not an error, and timeline() falls back to the computed end.
+   */
+  function enterResult(matches, nr, result, teams, config) {
+    const r = result || {};
+    const wo = (r.wo === 'a' || r.wo === 'b') ? r.wo : null;
+    const status = STATUS.indexOf(r.status) >= 0 ? r.status : 'done';
+
+    const out = (matches || []).map(m => m.nr !== nr ? m : Object.assign({}, m, {
+      sa: score(r.sa),
+      sb: score(r.sb),
+      wo,
+      status,
+      doneAt: status === 'done' ? String(r.doneAt || m.doneAt || '') : '',
+    }));
+    return resolve(out, teams, config);
+  }
+
   // ------------------------------------------------------------------ main
 
   function conflicts(matches, teams, config) {
@@ -1380,6 +1836,7 @@ const TournamentEngine = (() => {
     conflicts, standings, timeline, currentRound,
     allocation, groupSizes, buckets, plannedFinish,
     draw, groupPhase, circleMethod, endPhase, schedule,
+    resolve, placement, delayPlan, applyMove, enterResult,
     parseRef, errors, warnings, surnameOf, walkoverScore,
     toMinutes, hhmm,
   };

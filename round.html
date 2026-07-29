@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#a4161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Rundenblatt</title>
+<!--
+  SPEC §9.2 — the round screen.
+
+  The day-of screen, used one-handed and outdoors, so every control is a thumb
+  target and the numbers that matter are the largest things on it.
+
+  There is no sheet here. Build step 9 brings the Apps Script write path; until
+  then the tournament lives in localStorage and is generated on this device.
+  That is enough to work the screen for real and to try a delay against a full
+  30-team schedule, which is what this step is for.
+
+  Nothing on this screen decides anything by itself. A move is proposed,
+  conflicts() runs over the result, and an error throws the move away
+  (SPEC §6.2, §7).
+-->
+<style>
+:root{
+  --bg:#f4f4f6; --card:#ffffff; --line:#e2e2e6; --line2:#eeeef1;
+  --tx:#121214; --tx2:#5b5b62; --tx3:#8b8b93;
+  --acc:#8f1015; --acc-s:#fbeced;
+  --red:#a4161a; --ink:#1c1c1e; --ink-s:#ececef;
+  --live:#a4161a; --ok:#1a7f37; --ok-s:#e6f4ea; --warn:#9a6700; --warn-s:#fff6e0;
+  --r:14px; --sh:0 1px 2px rgba(0,0,0,.07),0 4px 14px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#111112; --card:#1a1a1d; --line:#2f2f33; --line2:#26262a;
+    --tx:#f0f0f2; --tx2:#a9a9b0; --tx3:#7d7d85;
+    --acc:#ff8a86; --acc-s:#341416;
+    --red:#8f1015; --ink:#e8e8ea; --ink-s:#2b2b30;
+    --live:#ff7a76; --ok:#3fb950; --ok-s:#12261a; --warn:#d29922; --warn-s:#2b2110;
+    --sh:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+  }
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--tx);
+  font:400 16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-text-size-adjust:100%;
+  padding-bottom:calc(40px + env(safe-area-inset-bottom));
+  overflow-x:hidden;
+}
+.wrap{max-width:760px;margin:0 auto;padding:0 12px}
+[hidden]{display:none!important}
+
+/* ---------- Kopf ---------- */
+header{
+  position:sticky;top:0;z-index:30;background:var(--red);color:#fff;
+  padding:calc(8px + env(safe-area-inset-top)) 0 10px;
+  box-shadow:0 2px 10px rgba(0,0,0,.2);border-bottom:3px solid #121214;
+}
+@media (prefers-color-scheme:dark){header{border-bottom-color:#000}}
+.htop{display:flex;align-items:center;gap:10px;font-size:12.5px;opacity:.92;padding-bottom:6px}
+.htop .ttl{flex:1;min-width:0;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hnav{display:flex;align-items:center;gap:10px}
+.hnav .rd{flex:1;min-width:0}
+.hnav .rd .big{font-size:23px;font-weight:800;letter-spacing:-.3px}
+.hnav .rd .sub{font-size:13px;opacity:.92;margin-top:1px}
+.hnav .rd .sub .late{font-weight:800}
+.step{
+  flex:none;width:44px;height:44px;border-radius:12px;border:0;cursor:pointer;
+  background:rgba(255,255,255,.16);color:#fff;font-size:21px;font-family:inherit;font-weight:700;
+}
+.step:disabled{opacity:.32}
+.step:active:not(:disabled){background:rgba(255,255,255,.32)}
+.now{
+  flex:none;border:0;cursor:pointer;background:#fff;color:var(--red);
+  font-weight:800;font-size:13px;padding:11px 13px;border-radius:12px;font-family:inherit;
+}
+.bar{height:6px;border-radius:99px;background:rgba(255,255,255,.28);overflow:hidden;margin-top:9px}
+.bar i{display:block;height:100%;background:#fff;border-radius:99px;transition:width .35s}
+
+/* ---------- Meldungen ---------- */
+.note{
+  border-radius:12px;padding:11px 13px;font-size:13.5px;margin:12px 0;
+  display:flex;gap:9px;align-items:flex-start;line-height:1.45;
+}
+.note.bad{background:var(--acc-s);color:var(--acc);border:1px solid var(--acc)}
+.note.warn{background:var(--warn-s);color:var(--warn);border:1px solid var(--warn)}
+.note.ok{background:var(--ok-s);color:var(--ok);border:1px solid var(--ok)}
+.note ul{margin:4px 0 0;padding-left:18px}
+.note li{margin:2px 0}
+
+/* ---------- Platzkarte ---------- */
+.court{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh);
+  margin-bottom:10px;overflow:hidden;
+}
+.court.done{border-left:4px solid var(--ok)}
+.court.playing{border-left:4px solid var(--live)}
+.chead{
+  display:flex;align-items:center;gap:8px;padding:9px 13px 7px;
+  font-size:11.5px;color:var(--tx2);flex-wrap:wrap;
+}
+.chead .pl{font-weight:800;background:var(--ink-s);color:var(--ink);padding:3px 9px;border-radius:6px}
+.chead .nr{font-weight:800;color:var(--tx3);font-variant-numeric:tabular-nums}
+.chead .lb{flex:1;min-width:0;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chead .st{font-weight:800;letter-spacing:.5px;text-transform:uppercase;font-size:10.5px;padding:3px 8px;border-radius:999px}
+.chead .st.playing{background:var(--live);color:#fff}
+.chead .st.done{background:var(--ok-s);color:var(--ok)}
+.chead .st.wo{background:var(--warn-s);color:var(--warn)}
+
+.tap{display:block;width:100%;border:0;background:transparent;color:inherit;
+  font-family:inherit;text-align:left;padding:0 13px 11px;cursor:pointer}
+.side{display:flex;align-items:center;gap:10px;padding:6px 0}
+.side + .side{border-top:1px solid var(--line2)}
+.side .nm{flex:1;min-width:0;font-size:16px;line-height:1.3}
+.side .nm.open{color:var(--tx3);font-style:italic;font-size:14.5px}
+.side .sc{flex:none;font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;
+  color:var(--tx3);min-width:30px;text-align:right}
+.side.w .nm{font-weight:800}
+.side.w .sc{color:var(--acc)}
+.side.l .nm,.side.l .sc{color:var(--tx2)}
+.hint{padding:0 13px 11px;font-size:12.5px;color:var(--tx3)}
+
+/* ---------- Eingabe ---------- */
+.panel{border-top:1px solid var(--line);padding:12px 13px 14px;background:var(--bg)}
+.scorerow{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.scorerow label{flex:1;min-width:0;font-size:13.5px;color:var(--tx2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scorerow input{
+  flex:none;width:78px;padding:13px 10px;border-radius:11px;border:1px solid var(--line);
+  background:var(--card);color:var(--tx);font-size:21px;font-weight:800;font-family:inherit;
+  text-align:center;font-variant-numeric:tabular-nums;
+}
+.scorerow input:focus{outline:2px solid var(--red);outline-offset:-1px;border-color:transparent}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+.btn{
+  flex:1 1 auto;min-width:120px;min-height:46px;padding:12px 14px;border:1px solid var(--line);
+  border-radius:12px;background:var(--card);color:var(--tx);font-size:14.5px;font-weight:700;
+  cursor:pointer;font-family:inherit;
+}
+.btn:active{background:var(--line2)}
+.btn.main{background:var(--red);border-color:var(--red);color:#fff;flex-basis:100%}
+.btn.main:disabled{opacity:.45}
+.btn.ghost{color:var(--tx2);font-weight:600}
+.btn.danger{color:var(--acc);border-color:var(--acc)}
+
+/* ---------- Vorschläge ---------- */
+.props{margin-top:12px;border-top:1px dashed var(--line);padding-top:12px}
+.props h3{margin:0 0 3px;font-size:13.5px;font-weight:800}
+.props p{margin:0 0 9px;font-size:12.5px;color:var(--tx2);line-height:1.45}
+.prop{
+  display:flex;align-items:center;gap:11px;width:100%;text-align:left;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:11px 12px;margin-bottom:7px;cursor:pointer;font-family:inherit;color:inherit;
+}
+.prop:active{background:var(--line2)}
+.prop.tired{border-style:dashed}
+.prop .who{flex:1;min-width:0}
+.prop .who .t{font-size:14.5px;font-weight:700;line-height:1.25}
+.prop .who .r{font-size:12px;color:var(--tx3);margin-top:2px}
+.prop .go{flex:none;font-size:12.5px;font-weight:800;color:var(--acc);
+  background:var(--acc-s);padding:8px 11px;border-radius:9px}
+
+/* ---------- Einrichtung ---------- */
+.setup{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh);
+  padding:18px;margin:16px 0}
+.setup h2{margin:0 0 6px;font-size:18px}
+.setup p{margin:0 0 12px;font-size:13.5px;color:var(--tx2);line-height:1.55}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:12.5px;font-weight:700;color:var(--tx2);margin-bottom:4px}
+.field input,.field textarea{
+  width:100%;padding:12px;border-radius:11px;border:1px solid var(--line);
+  background:var(--bg);color:var(--tx);font-size:15px;font-family:inherit;
+}
+.field textarea{min-height:170px;resize:vertical;line-height:1.5}
+.grid{display:flex;flex-wrap:wrap;gap:10px}
+.grid .field{flex:1 1 120px;margin-bottom:0}
+.preview{font-size:13px;color:var(--tx2);margin-top:12px;line-height:1.6}
+.preview b{color:var(--tx)}
+footer{text-align:center;color:var(--tx3);font-size:11.5px;padding:26px 0 10px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<header hidden id="head">
+  <div class="wrap">
+    <div class="htop">
+      <span class="ttl" id="title"></span>
+      <span id="played"></span>
+    </div>
+    <div class="hnav">
+      <button class="step" id="prev" aria-label="Vorherige Runde">‹</button>
+      <div class="rd">
+        <div class="big" id="roundName"></div>
+        <div class="sub" id="roundTime"></div>
+      </div>
+      <button class="now" id="jump">Jetzt</button>
+      <button class="step" id="next" aria-label="Nächste Runde">›</button>
+    </div>
+    <div class="bar"><i id="progress" style="width:0%"></i></div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="messages"></div>
+  <div id="courts"></div>
+  <div id="setup" hidden></div>
+  <footer id="foot" hidden>
+    Rundenblatt · Änderungen bleiben auf diesem Gerät.<br>
+    <button class="btn ghost" id="reset" style="margin-top:10px;min-width:auto">Turnier verwerfen</button>
+  </footer>
+</main>
+
+<script src="engine.js"></script>
+<script>
+'use strict';
+
+const E = TournamentEngine;
+const $ = s => document.querySelector(s);
+const KEY = 'tp.tournament';
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+/* ---------- Zustand ---------- */
+
+/*
+ * The tournament, and the three things that are only about this screen: which
+ * round is shown, which match is open under a thumb, and whether its delay
+ * panel is unfolded. None of those belong to the tournament, so none is stored
+ * with it.
+ */
+let T = null;            // { config, teams, matches }
+let shown = 1;
+let openNr = null;
+let delaying = false;
+let messages = [];
+
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    T = raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    T = null;
+    console.warn('Gespeichertes Turnier unlesbar:', err);
+  }
+}
+
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(T));
+  } catch (err) {
+    messages = [{ severity: 'error', message: 'Speichern fehlgeschlagen: ' + err.message }];
+  }
+}
+
+/** The device clock, as the HH:MM stamp §3.3 wants. The engine never reads it. */
+const clock = () => {
+  const d = new Date();
+  return E.hhmm(d.getHours() * 60 + d.getMinutes());
+};
+
+/* ---------- Ableitungen ---------- */
+
+const byId = () => new Map(T.teams.map(t => [t.id, t]));
+
+const nameOf = (map, id) => {
+  const t = id && map.get(id);
+  return t ? `${t.p1} / ${t.p2}` : null;
+};
+
+const inRound = round => T.matches
+  .filter(m => m.round === round)
+  .sort((a, b) => (a.court || 0) - (b.court || 0));
+
+const lastRound = () => Math.max(1, ...T.matches.map(m => m.round || 1));
+
+/**
+ * The human label behind an unresolved slot — "Sieger Viertelfinale 2", the
+ * same wording the 2026 sheet used, because it is what the organizer says out
+ * loud when calling the match onto court.
+ *
+ * Two matches can carry the same label: both halves of a placement round do.
+ * Then the label alone names two different teams, so the match number is
+ * appended — "Sieger Platzierungsrunde Platz 13–16 (#111)". It is only added
+ * where it is needed, because a number on every line reads like a form.
+ */
+function refLabel(ref) {
+  const p = E.parseRef(ref);
+  if (p.kind === 'G') return `${p.rank}. Gruppe ${p.group}`;
+  if (p.kind === 'B') return `${p.rank}. aus Topf ${p.bucket}`;
+  if (p.kind === 'W' || p.kind === 'L') {
+    const what = p.kind === 'W' ? 'Sieger' : 'Verlierer';
+    const src = T.matches.find(m => m.nr === p.src);
+    if (!src) return `${what} Spiel ${p.src}`;
+    const shared = T.matches.filter(m => m.label === src.label).length > 1;
+    return `${what} ${src.label}` + (shared ? ` (#${src.nr})` : '');
+  }
+  return 'offen';
+}
+
+/** §5.4: a match has a result once both scores are there, or a walkover is. */
+const hasResult = m => m.wo === 'a' || m.wo === 'b' || (m.sa != null && m.sb != null);
+
+/** First name only, so a walkover button stays inside a phone. */
+const short = name => String(name).split('/')[0].trim();
+
+/* ---------- Änderungen ---------- */
+
+/**
+ * §7: conflicts() runs before any change is kept. Errors throw the change
+ * away — the schedule on screen is the one the courts are working from, and a
+ * broken one is worse than a refused move.
+ */
+function commit(matches, okMessage) {
+  const issues = E.conflicts(matches, T.teams, T.config);
+  const errors = E.errors(issues);
+  if (errors.length) {
+    messages = errors.concat([{ severity: 'error', message: 'Die Änderung wurde verworfen.' }]);
+    return false;
+  }
+  T.matches = matches;
+  save();
+  messages = E.warnings(issues);
+  if (okMessage) messages = [{ severity: 'ok', message: okMessage }].concat(messages);
+  return true;
+}
+
+function saveResult(nr, result) {
+  const next = E.enterResult(T.matches, nr, result, T.teams, T.config);
+  if (commit(next)) {
+    openNr = null;
+    delaying = false;
+  }
+  render();
+}
+
+function moveMatch(nr, toRound, promote) {
+  const next = E.applyMove(T.matches, T.config, { nr, toRound, promote });
+  const said = promote == null
+    ? `Spiel ${nr} steht jetzt in Runde ${toRound}, der Platz bleibt frei.`
+    : `Spiel ${promote} rückt vor, Spiel ${nr} geht dafür in Runde ${toRound}.`;
+  if (commit(next, said)) {
+    openNr = null;
+    delaying = false;
+  }
+  render();
+}
+
+/* ---------- Rundenblatt ---------- */
+
+function renderHeader(rows, row) {
+  const ms = inRound(shown);
+  const done = ms.filter(m => m.status === 'done').length;
+  const last = lastRound();
+
+  $('#title').textContent = T.config.title || 'Turnier';
+  $('#played').textContent =
+    `${T.matches.filter(m => m.status === 'done').length} / ${T.matches.length} gespielt`;
+  $('#roundName').textContent = `Runde ${shown} von ${last}`;
+
+  const sub = $('#roundTime');
+  sub.textContent = '';
+  const counted = `${done} von ${ms.length} Ergebnissen`;
+  if (row && row.start != null) {
+    sub.append(document.createTextNode(`${E.hhmm(row.start)} Uhr · ${counted}`));
+    if (row.delta > 0) {
+      sub.append(document.createTextNode(' · '));
+      sub.append(el('span', 'late', `+${row.delta} Min`));
+    }
+  } else {
+    sub.textContent = counted;
+  }
+
+  $('#progress').style.width = ms.length ? Math.round(done / ms.length * 100) + '%' : '0%';
+  $('#prev').disabled = shown <= 1;
+  $('#next').disabled = shown >= last;
+
+  const current = E.currentRound(rows);
+  $('#jump').hidden = !current || current.round === shown;
+}
+
+function renderMessages() {
+  const box = $('#messages');
+  box.textContent = '';
+  if (!messages.length) return;
+
+  const block = (list, cls, title) => {
+    if (!list.length) return;
+    const note = el('div', 'note ' + cls);
+    const body = el('div');
+    if (title) body.append(el('strong', null, title));
+    const ul = el('ul');
+    for (const i of list) ul.append(el('li', null, i.message));
+    body.append(ul);
+    note.append(body);
+    box.append(note);
+  };
+
+  block(messages.filter(m => m.severity === 'ok'), 'ok', null);
+  block(messages.filter(m => m.severity === 'error'), 'bad', 'Das geht so nicht:');
+  block(messages.filter(m => m.severity === 'warning'), 'warn', 'Zur Kenntnis:');
+}
+
+/** One court: who is on it, what the score is, and the way in. */
+function courtCard(m, names) {
+  const card = el('div', 'court ' +
+    (m.status === 'done' ? 'done' : m.status === 'playing' ? 'playing' : ''));
+
+  const head = el('div', 'chead');
+  head.append(el('span', 'pl', `Platz ${m.court}`));
+  head.append(el('span', 'nr', `#${m.nr}`));
+  head.append(el('span', 'lb', m.label));
+  if (m.wo) head.append(el('span', 'st wo', 'Walkover'));
+  else if (m.status === 'playing') head.append(el('span', 'st playing', 'läuft'));
+  else if (m.status === 'done') head.append(el('span', 'st done', 'fertig'));
+  card.append(head);
+
+  const wo = E.walkoverScore(T.config);
+  const shownScore = m.wo === 'a' ? wo : m.wo === 'b' ? [wo[1], wo[0]] : [m.sa, m.sb];
+  const decided = hasResult(m) && shownScore[0] !== shownScore[1];
+
+  const tap = el('button', 'tap');
+  tap.type = 'button';
+  ['a', 'b'].forEach((which, i) => {
+    const id = which === 'a' ? m.aTeam : m.bTeam;
+    const name = nameOf(names, id);
+    const side = el('div', 'side' +
+      (decided ? (shownScore[i] > shownScore[1 - i] ? ' w' : ' l') : ''));
+    side.append(el('div', 'nm' + (name ? '' : ' open'),
+      name || refLabel(which === 'a' ? m.aRef : m.bRef)));
+    side.append(el('div', 'sc', shownScore[i] == null ? '–' : String(shownScore[i])));
+    tap.append(side);
+  });
+  tap.addEventListener('click', () => {
+    delaying = false;
+    openNr = openNr === m.nr ? null : m.nr;
+    render();
+  });
+  card.append(tap);
+
+  if (openNr === m.nr) card.append(panel(m, names));
+  else if (!hasResult(m)) card.append(el('div', 'hint', 'Tippen, um das Ergebnis einzutragen.'));
+
+  return card;
+}
+
+/** §9.2: score entry, mark as playing, walkover, delay. */
+function panel(m, names) {
+  const box = el('div', 'panel');
+  const aName = nameOf(names, m.aTeam) || refLabel(m.aRef);
+  const bName = nameOf(names, m.bTeam) || refLabel(m.bRef);
+  const known = !!(m.aTeam && m.bTeam);
+
+  const inputs = {};
+  [['a', aName, m.sa], ['b', bName, m.sb]].forEach(([which, name, value]) => {
+    const row = el('div', 'scorerow');
+    const input = el('input');
+    input.type = 'number';
+    input.inputMode = 'numeric';
+    input.min = '0';
+    input.id = `score-${m.nr}-${which}`;
+    input.value = value == null ? '' : String(value);
+    input.disabled = !known;
+    const label = el('label', null, name);
+    label.htmlFor = input.id;
+    row.append(label, input);
+    box.append(row);
+    inputs[which] = input;
+  });
+
+  if (!known) {
+    box.append(el('div', 'hint',
+      'Die Teams stehen noch nicht fest. Sobald die Vorspiele eingetragen sind, ' +
+      'stehen die Namen hier.'));
+  }
+
+  const btns = el('div', 'btns');
+
+  const store = el('button', 'btn main', 'Ergebnis speichern');
+  store.type = 'button';
+  store.disabled = !known;
+  store.addEventListener('click', () => saveResult(m.nr, {
+    sa: inputs.a.value, sb: inputs.b.value, status: 'done', doneAt: m.doneAt || clock(),
+  }));
+  btns.append(store);
+
+  if (known && m.status !== 'playing' && !hasResult(m)) {
+    const playing = el('button', 'btn', 'Läuft');
+    playing.type = 'button';
+    playing.addEventListener('click', () => saveResult(m.nr, { status: 'playing' }));
+    btns.append(playing);
+  }
+
+  if (known) {
+    const woScore = E.walkoverScore(T.config).join(':');
+    [['a', aName], ['b', bName]].forEach(([which, name]) => {
+      const b = el('button', 'btn', `Walkover ${woScore} für ${short(name)}`);
+      b.type = 'button';
+      b.addEventListener('click', () => saveResult(m.nr, { wo: which, status: 'done', doneAt: clock() }));
+      btns.append(b);
+    });
+  }
+
+  const move = el('button', 'btn danger', delaying ? 'Verschieben abbrechen' : 'Verschieben');
+  move.type = 'button';
+  move.addEventListener('click', () => { delaying = !delaying; render(); });
+  btns.append(move);
+
+  if (hasResult(m)) {
+    const clear = el('button', 'btn ghost', 'Ergebnis löschen');
+    clear.type = 'button';
+    clear.addEventListener('click', () => saveResult(m.nr, { sa: null, sb: null, status: 'open' }));
+    btns.append(clear);
+  }
+
+  box.append(btns);
+  if (delaying) box.append(proposals(m, names));
+  return box;
+}
+
+/**
+ * §6.2: the target round and the three replacements — proposed, never applied.
+ * The reasons come from the engine and are shown as they are: a suggestion the
+ * admin cannot explain to the players is one they will not take.
+ */
+function proposals(m, names) {
+  const box = el('div', 'props');
+  const plan = E.delayPlan(T.matches, T.teams, T.config, m.nr);
+
+  if (!plan || (plan.target == null && !plan.top.length)) {
+    box.append(el('h3', null, 'Verschieben nicht möglich'));
+    box.append(el('p', null,
+      'Es gibt keine spätere Runde, in der beide Teams frei sind und noch nichts ' +
+      'auf dieses Ergebnis wartet.'));
+    return box;
+  }
+
+  box.append(el('h3', null, `Spiel ${m.nr} verschieben`));
+  box.append(el('p', null, plan.top.length
+    ? `Wer soll stattdessen auf Platz ${m.court}? Spiel ${m.nr} nimmt dessen Runde ein. ` +
+      'Von allein passiert nichts — hier auswählen:'
+    : 'Kein Spiel lässt sich vorziehen; der Platz bliebe in dieser Runde leer.'));
+
+  for (const c of plan.top) {
+    const source = T.matches.find(x => x.nr === c.nr);
+    const a = nameOf(names, source.aTeam) || refLabel(source.aRef);
+    const b = nameOf(names, source.bTeam) || refLabel(source.bRef);
+
+    const row = el('button', 'prop' + (c.rested ? '' : ' tired'));
+    row.type = 'button';
+    const who = el('div', 'who');
+    who.append(el('div', 't', `${a} — ${b}`));
+    who.append(el('div', 'r',
+      `#${c.nr} · ${source.label} · aus Runde ${c.round} · ${c.reasons.join(' · ')}`));
+    row.append(who);
+    row.append(el('span', 'go', 'Tauschen'));
+    row.addEventListener('click', () => moveMatch(m.nr, c.target, c.nr));
+    box.append(row);
+  }
+
+  if (plan.target != null) {
+    const alone = el('button', 'btn ghost',
+      `Nur nach Runde ${plan.target}, Platz frei lassen`);
+    alone.type = 'button';
+    alone.addEventListener('click', () => moveMatch(m.nr, plan.target, null));
+    box.append(alone);
+  }
+
+  return box;
+}
+
+function render() {
+  if (!T) return renderSetup();
+
+  $('#head').hidden = false;
+  $('#foot').hidden = false;
+  $('#setup').hidden = true;
+
+  const rows = E.timeline(T.matches, T.config);
+  const row = rows.find(r => r.round === shown);
+  const names = byId();
+
+  renderHeader(rows, row);
+  renderMessages();
+
+  const box = $('#courts');
+  box.textContent = '';
+  const ms = inRound(shown);
+  if (!ms.length) {
+    box.append(el('div', 'note warn', 'In dieser Runde steht kein Spiel.'));
+    return;
+  }
+  for (const m of ms) box.append(courtCard(m, names));
+}
+
+/* ---------- Einrichtung ---------- */
+
+/*
+ * Build step 9 replaces all of this with the sheet. Until then the tournament
+ * is generated here, which is enough to work the round screen against a real
+ * schedule rather than a toy one.
+ */
+const DEFAULTS = {
+  title: 'Turnier', courts: 5, start: '09:00', matchMin: 10, semiMin: 12,
+  finalMode: 'set', walkover: '2:0', seed: 1,
+};
+
+const SETUP_FIELDS = [
+  ['title', 'Titel', 'text'],
+  ['courts', 'Plätze', 'number'],
+  ['start', 'Beginn', 'text'],
+  ['matchMin', 'Minuten je Spiel', 'number'],
+  ['semiMin', 'Minuten Halbfinale', 'number'],
+  ['seed', 'Losnummer', 'number'],
+];
+
+function renderSetup() {
+  $('#head').hidden = true;
+  $('#foot').hidden = true;
+  $('#courts').textContent = '';
+  renderMessages();
+
+  const box = $('#setup');
+  box.hidden = false;
+  box.textContent = '';
+
+  const card = el('div', 'setup');
+  card.append(el('h2', null, 'Turnier anlegen'));
+  card.append(el('p', null,
+    'Ein Team je Zeile, die beiden Namen mit einem Schrägstrich getrennt. ' +
+    'Auslosung und Spielplan entstehen daraus. Beides ist gesetzt: dieselbe ' +
+    'Eingabe mit derselben Losnummer ergibt immer dasselbe Turnier.'));
+
+  const teamsField = el('div', 'field');
+  const teamsInput = el('textarea');
+  teamsInput.id = 'teams';
+  teamsInput.placeholder = 'Huber Maxi / Hochradl Tanja\nKern Tom / Vorbach Julian\n…';
+  const teamsLabel = el('label', null, 'Teams (16 bis 32)');
+  teamsLabel.htmlFor = teamsInput.id;
+  teamsField.append(teamsLabel, teamsInput);
+  card.append(teamsField);
+
+  const grid = el('div', 'grid');
+  const fields = {};
+  for (const [key, text, type] of SETUP_FIELDS) {
+    const field = el('div', 'field');
+    const input = el('input');
+    input.type = type;
+    input.id = 'cfg-' + key;
+    input.value = String(DEFAULTS[key]);
+    const label = el('label', null, text);
+    label.htmlFor = input.id;
+    field.append(label, input);
+    grid.append(field);
+    fields[key] = input;
+  }
+  card.append(grid);
+
+  const preview = el('div', 'preview');
+  const go = el('button', 'btn main', 'Spielplan erzeugen');
+  go.type = 'button';
+  card.append(preview, go);
+  box.append(card);
+
+  const readTeams = () => teamsInput.value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const readConfig = () => Object.assign({}, DEFAULTS, {
+    title: fields.title.value.trim() || DEFAULTS.title,
+    courts: Number(fields.courts.value) || DEFAULTS.courts,
+    start: fields.start.value.trim() || DEFAULTS.start,
+    matchMin: Number(fields.matchMin.value) || DEFAULTS.matchMin,
+    semiMin: Number(fields.semiMin.value) || DEFAULTS.semiMin,
+    seed: Number(fields.seed.value) || DEFAULTS.seed,
+    breaks: [],
+  });
+
+  /* §5.2, live: the organizer is really making a duration decision. */
+  const update = () => {
+    const a = E.allocation(Object.assign({ teams: readTeams().length }, readConfig()));
+    preview.textContent = '';
+    if (!a.ok) {
+      for (const p of a.problems) preview.append(el('div', null, p.message));
+      go.disabled = true;
+      return;
+    }
+    go.disabled = false;
+    const line = el('div');
+    line.append(document.createTextNode(
+      `${a.teams} Teams · Gruppen ${a.groups.map(g => g.size).join('/')} · `));
+    line.append(el('b', null, `${a.matches} Spiele in ${a.rounds} Runden`));
+    preview.append(line);
+    preview.append(el('div', null, a.finish == null
+      ? `Finale ab ${E.hhmm(a.finalStart)} Uhr, offenes Ende`
+      : `Ende gegen ${E.hhmm(a.finish)} Uhr`));
+  };
+
+  teamsInput.addEventListener('input', update);
+  for (const key in fields) fields[key].addEventListener('input', update);
+  update();
+
+  go.addEventListener('click', () => {
+    const config = readConfig();
+    const teams = readTeams().map((line, i) => {
+      const parts = line.split('/');
+      return {
+        id: 'T' + String(i + 1).padStart(2, '0'),
+        p1: (parts[0] || line).trim(),
+        p2: (parts[1] || '').trim(),
+      };
+    });
+
+    const drawn = E.draw(teams, config);
+    const plan = E.schedule(drawn, config);
+    const matches = E.resolve(plan.matches, drawn, config);
+
+    const issues = E.conflicts(matches, drawn, config);
+    if (E.errors(issues).length) {
+      messages = E.errors(issues);
+      renderSetup();
+      return;
+    }
+
+    T = { config, teams: drawn, matches };
+    shown = 1;
+    openNr = null;
+    delaying = false;
+    messages = E.warnings(issues);
+    save();
+    render();
+  });
+}
+
+/* ---------- Bedienung ---------- */
+
+const goTo = round => {
+  shown = round;
+  openNr = null;
+  delaying = false;
+  render();
+};
+
+$('#prev').addEventListener('click', () => goTo(Math.max(1, shown - 1)));
+$('#next').addEventListener('click', () => goTo(Math.min(lastRound(), shown + 1)));
+$('#jump').addEventListener('click', () => {
+  const current = E.currentRound(E.timeline(T.matches, T.config));
+  goTo(current ? current.round : lastRound());
+});
+$('#reset').addEventListener('click', () => {
+  localStorage.removeItem(KEY);
+  T = null;
+  messages = [];
+  render();
+});
+
+load();
+if (T) {
+  const current = E.currentRound(E.timeline(T.matches, T.config));
+  shown = current ? current.round : lastRound();
+}
+render();
+</script>
+</body>
+</html>
