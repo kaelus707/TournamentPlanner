@@ -248,9 +248,18 @@ alone on court 1, so they cost a round each however many courts stand empty.
 `sharedMatches` is everything else.
 
 Both formulas reproduce 2026 exactly: `ceil(98/5) = 20` is the group phase, and
-`ceil(29/3) + 4 = 14` is the endrunde, which ran on three courts. That agreement
-is a check on the model, not a guarantee — the generators of build steps 4 and 6
-may need a round more, and once a schedule exists `timeline()` is the truth.
+`ceil(29/3) + 4 = 14` is the endrunde, which ran on three courts.
+
+**They are floors, not predictions.** The generator of step 4 matches them
+whenever the field can keep the courts busy — every count from 16 to 32 teams on
+3 or 4 courts, and 30 teams on 5 — but the break of §5.3 caps how much can be
+packed: two consecutive rounds together hold at most half the field, so courts
+beyond that sit idle. 24 teams on 6 courts needs 13 rounds against a floor of
+10, and no seed does better, because a group of six cannot be split into two
+alternating halves that still play each other.
+
+So the preview should be read as "not before this". Once a schedule exists,
+`groupPhase()` reports the real count and `timeline()` is the truth.
 
 The finish time uses the same tail: rounds `R−3 … R` are Halbfinale, Halbfinale,
 Spiel um Platz 3, Finale, so the durations are known without a schedule. An
@@ -266,12 +275,30 @@ makes packing simple:
    A group of size `m` yields `m-1` rounds (`m` rounds with a bye if `m` is odd).
 2. Distribute group-rounds across global rounds, at most `courts` matches per
    global round.
-3. Constraint: two rounds of the same group must be at least **two global rounds
-   apart**. This gives every team its break automatically.
+3. Constraint: **no team plays in two consecutive global rounds.** Every team
+   gets its break.
 
 If step 3 cannot be satisfied, increase the number of global rounds. Do not
 attempt clever optimisation — at this scale a greedy pass with a few randomised
 restarts is sufficient and the result is easy to reason about.
+
+**A group-round is not atomic.** It cannot be: groups of 8/8/7/7 produce blocks
+of 4, 4, 3 and 3 matches, and no two of those fit on five courts, so whole-block
+packing would need 28 global rounds where 20 suffice. The 2026 schedule splits
+them too — its first round is four Gruppe A matches and one of Gruppe B.
+
+That is why step 3 is stated at the team and not at the group. An earlier
+draft said "two rounds of the same group must be at least two global rounds
+apart", which is the same rule *only* while blocks stay whole. Once a block is
+split the group-level phrasing forbids schedules that are perfectly restful and
+permits ones that are not, so the team-level rule is the one that survives.
+
+The break is a hard constraint: a court is left empty rather than filled with a
+team that played last round. The single exception is a global round that would
+otherwise be empty, which would postpone the tournament rather than schedule it.
+
+The draw and the packing are both **seeded**. Regenerating after correcting a
+misspelled name must return the same tournament, not a new one.
 
 ### 5.4 Standings
 

@@ -753,6 +753,287 @@ const TournamentEngine = (() => {
     };
   }
 
+  // ------------------------------------------------------- group generator
+
+  /*
+   * How many greedy attempts the packer makes. §5.3 asks for "a greedy pass
+   * with a few randomised restarts" and explicitly warns off cleverness; the
+   * restarts are what turn a merely legal packing into a tight one, and twelve
+   * of them cost a few milliseconds on the largest tournament this format runs.
+   */
+  const RESTARTS = 12;
+
+  /**
+   * Deterministic PRNG (xorshift32).
+   *
+   * The generator makes random choices, and the same seed has to give the same
+   * schedule every time. An organizer who regenerates after fixing a misspelled
+   * name must get their plan back, not a different tournament.
+   */
+  function randomFrom(seed) {
+    let s = (Number(seed) >>> 0) || 0x9e3779b9;
+    return () => {
+      s ^= s << 13; s >>>= 0;
+      s ^= s >>> 17;
+      s ^= s << 5;  s >>>= 0;
+      return s / 4294967296;
+    };
+  }
+
+  function shuffled(list, random) {
+    const out = list.slice();
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      const swap = out[i];
+      out[i] = out[j];
+      out[j] = swap;
+    }
+    return out;
+  }
+
+  /**
+   * §3.2: fills the `group` column.
+   *
+   * The sizes are §5.1's; which team lands in which group is the draw itself.
+   * It is seeded for the same reason the packer is — a redraw after a
+   * correction should return the same groups, not a new tournament — and the
+   * organizer can overwrite any cell afterwards, because `group` is stored
+   * data and not a derivation.
+   */
+  function draw(teams, config) {
+    const list = teams || [];
+    const order = shuffled(list.map(t => t.id), randomFrom(config && config.seed));
+    const group = new Map();
+    let at = 0;
+    for (const g of groupSizes(order.length)) {
+      for (let i = 0; i < g.size; i++) group.set(order[at++], g.group);
+    }
+    return list.map(t => Object.assign({}, t, { group: group.get(t.id) }));
+  }
+
+  /**
+   * §5.3 step 1: the circle method. One team is held in place while the rest
+   * rotate around it, so every pair meets exactly once — m-1 rounds for even m,
+   * and m rounds with one team resting each time for odd m.
+   *
+   * Which side takes the A slot alternates by round, so that no team ends up
+   * the left-hand name on every line of its schedule.
+   */
+  function circleMethod(ids) {
+    const order = ids.slice();
+    if (order.length % 2 === 1) order.push(null);
+    const n = order.length;
+    if (n < 2) return [];
+
+    const rounds = [];
+    for (let r = 0; r < n - 1; r++) {
+      const pairs = [];
+      for (let i = 0; i < n / 2; i++) {
+        const a = order[i], b = order[n - 1 - i];
+        if (a != null && b != null) pairs.push(r % 2 === 0 ? [a, b] : [b, a]);
+      }
+      rounds.push(pairs);
+      order.splice(1, 0, order.pop());   // hold order[0], rotate everything else
+    }
+    return rounds;
+  }
+
+  /** Lexicographic "is x the better candidate", on the score tuples below. */
+  function better(x, y) {
+    for (let i = 0; i < x.length; i++) {
+      if (x[i] !== y[i]) return x[i] > y[i];
+    }
+    return false;
+  }
+
+  /**
+   * The next match to put on a free court, or null when none fits.
+   *
+   * With `rested` set, a pair that played in the previous round is not a
+   * candidate at all — that is the break of §5.3, and the caller drops the flag
+   * only when holding it would leave a round completely empty.
+   *
+   * Scored, in order: the group with the most matches still to place, so none
+   * is left with a tail nobody can pack; then the pair that has waited longest;
+   * then the seeded coin.
+   */
+  function nextMatch(queues, busy, lastRound, round, random, rested) {
+    let pick = null, best = null;
+
+    for (const q of queues) {
+      const block = q.rounds[q.front];
+      if (!block) continue;
+      for (let i = 0; i < block.length; i++) {
+        const a = block[i][0], b = block[i][1];
+        if (busy.has(a) || busy.has(b)) continue;
+
+        const restA = round - (lastRound.has(a) ? lastRound.get(a) : -1);
+        const restB = round - (lastRound.has(b) ? lastRound.get(b) : -1);
+        const rest = Math.min(restA, restB);
+        if (rested && rest < 2) continue;
+
+        const score = [q.left, rest, random()];
+        if (!best || better(score, best)) { best = score; pick = { queue: q, index: i }; }
+      }
+    }
+    return pick;
+  }
+
+  /**
+   * §5.3 steps 2 and 3: the group-rounds spread over global rounds, at most
+   * `courts` matches per global round.
+   *
+   * **A group-round is not atomic here, and cannot be.** Four groups of 8/8/7/7
+   * produce blocks of 4, 4, 3 and 3 matches, and no two of those fit on five
+   * courts — whole-block packing would need 28 global rounds where 20 suffice.
+   * The 2026 schedule splits them too: its first round is four Gruppe-A matches
+   * and one of Gruppe B.
+   *
+   * So the two-rounds-apart rule is enforced where §5.3 says it is aimed —
+   * "this gives every team its break" — at the team. A pair that played in the
+   * previous round is taken only when nothing else can fill the court, because
+   * leaving the court empty costs a whole round for everybody.
+   *
+   * A group offers one group-round at a time and moves to the next only between
+   * global rounds, which is what keeps the four groups interleaved instead of
+   * one group swallowing every court.
+   */
+  function pack(groups, courts, random) {
+    const queues = groups.map(g => {
+      const rounds = circleMethod(shuffled(g.ids, random)).map(r => r.slice());
+      return {
+        group: g.group,
+        rounds,
+        front: 0,
+        left: rounds.reduce((n, r) => n + r.length, 0),
+      };
+    });
+
+    const plan = [];
+    const lastRound = new Map();
+
+    while (queues.some(q => q.left > 0)) {
+      const round = plan.length + 1;
+      for (const q of queues) {
+        while (q.rounds[q.front] && q.rounds[q.front].length === 0) q.front++;
+      }
+
+      const busy = new Set();
+      const chosen = [];
+
+      // Courts may be left empty to protect a break. They may not be left empty
+      // to the point where the round holds nothing at all — that would not
+      // schedule the tournament, it would only postpone it forever. So a round
+      // that comes up empty is filled again with the break rule dropped.
+      for (const rested of [true, false]) {
+        while (chosen.length < courts) {
+          const pick = nextMatch(queues, busy, lastRound, round, random, rested);
+          if (!pick) break;
+          const pair = pick.queue.rounds[pick.queue.front].splice(pick.index, 1)[0];
+          pick.queue.left--;
+          busy.add(pair[0]);
+          busy.add(pair[1]);
+          chosen.push({ group: pick.queue.group, a: pair[0], b: pair[1] });
+        }
+        if (chosen.length) break;
+      }
+
+      // Cannot happen: a group with matches left always has a non-empty front
+      // block, and at the top of a round no team is busy yet. Bailing out beats
+      // spinning forever if that reasoning is ever wrong.
+      if (!chosen.length) break;
+
+      for (const m of chosen) { lastRound.set(m.a, round); lastRound.set(m.b, round); }
+      plan.push(chosen);
+    }
+
+    return plan;
+  }
+
+  /** How many times a team plays two global rounds in a row (§7, a warning). */
+  function missedBreaks(plan) {
+    const last = new Map();
+    let count = 0;
+    plan.forEach((matches, i) => {
+      const round = i + 1;
+      for (const m of matches) {
+        for (const id of [m.a, m.b]) {
+          if (last.get(id) === round - 1) count++;
+          last.set(id, round);
+        }
+      }
+    });
+    return count;
+  }
+
+  /** The packed plan as §4 match objects, numbered top to bottom. */
+  function toMatches(plan) {
+    const out = [];
+    let nr = 0;
+    plan.forEach((matches, i) => {
+      matches.forEach((m, court) => {
+        out.push({
+          nr: ++nr,
+          round: i + 1,
+          court: court + 1,
+          phase: 'Gruppe',
+          label: `Gruppe ${m.group}`,
+          aRef: `T:${m.a}`,
+          bRef: `T:${m.b}`,
+          aTeam: m.a,
+          bTeam: m.b,
+          sa: null,
+          sb: null,
+          status: 'open',
+          wo: null,
+          doneAt: '',
+        });
+      });
+    });
+    return out;
+  }
+
+  /**
+   * §10 step 4: the whole group phase, from grouped teams to numbered matches.
+   *
+   * Teams without a group are skipped — `group` is stored data (§3.2) and
+   * draw() is what fills it. Nothing here validates the result; conflicts() is
+   * where that happens, and the caller is expected to run it.
+   *
+   * Randomised restarts pick the tightest plan: fewest rounds first, then
+   * fewest teams made to play twice in a row.
+   */
+  function groupPhase(teams, config) {
+    const courts = Math.max(1, Number(config && config.courts) || 0);
+    const seed = Number(config && config.seed) || 1;
+
+    const byGroup = new Map();
+    for (const t of teams || []) {
+      if (!t || !t.group) continue;
+      if (!byGroup.has(t.group)) byGroup.set(t.group, []);
+      byGroup.get(t.group).push(t.id);
+    }
+    const groups = [...byGroup.keys()].sort().map(group => ({ group, ids: byGroup.get(group) }));
+    if (!groups.length) return { matches: [], rounds: 0, seed: null, missedBreaks: 0 };
+
+    let winner = null;
+    for (let i = 0; i < RESTARTS; i++) {
+      const plan = pack(groups, courts, randomFrom(seed + i));
+      const tried = { plan, seed: seed + i, rounds: plan.length, missedBreaks: missedBreaks(plan) };
+      const wins = !winner
+        || tried.rounds < winner.rounds
+        || (tried.rounds === winner.rounds && tried.missedBreaks < winner.missedBreaks);
+      if (wins) winner = tried;
+    }
+
+    return {
+      matches: toMatches(winner.plan),
+      rounds: winner.rounds,
+      seed: winner.seed,
+      missedBreaks: winner.missedBreaks,
+    };
+  }
+
   // ------------------------------------------------------------------ main
 
   function conflicts(matches, teams, config) {
@@ -778,6 +1059,7 @@ const TournamentEngine = (() => {
   return {
     conflicts, standings, timeline, currentRound,
     allocation, groupSizes, buckets, plannedFinish,
+    draw, groupPhase, circleMethod,
     parseRef, errors, warnings, surnameOf, walkoverScore,
     toMinutes, hhmm,
   };
