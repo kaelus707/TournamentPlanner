@@ -1577,6 +1577,67 @@ const TournamentEngine = (() => {
     return [...rows.values()].sort((a, b) => a.place - b.place);
   }
 
+  // ------------------------------------------------------------- WEB output
+
+  /*
+   * §8 is the contract between engine and viewer, so a value that would split a
+   * line into the wrong number of fields cannot be written as it stands. A pipe
+   * inside a name becomes a space, as does a line break. Nothing is escaped:
+   * the format has no escape, and inventing one here would itself be a change
+   * to the contract.
+   */
+  const cell = v => String(v == null ? '' : v).replace(/[|\r\n]+/g, ' ').trim();
+
+  const line = fields => fields.map(cell).join('|');
+
+  /**
+   * §8: the whole tournament as the pipe-delimited lines the viewer reads.
+   *
+   * The `C` line carries the four timing values of §6.1 and nothing else. The
+   * viewer computes its own times from `round` (§9.1) and has no other source
+   * for them — `Config` holds the admin token, so a public screen must never
+   * read it.
+   *
+   * `sa` / `sb` are what a table would count, which for a walkover is the
+   * configured score rather than the abandoned partial one (§5.4). The format
+   * has no walkover field, and writing the partial score would put a different
+   * result on the M line from the one the G lines are built on.
+   */
+  function webFormat(matches, teams, config) {
+    const cfg = config || {};
+    const list = teams || [];
+    const teamIdx = indexTeams(list);
+    const wo = walkoverScore(cfg);
+    const ms = resolve(matches, list, cfg).sort((a, b) => (a.nr || 0) - (b.nr || 0));
+
+    const name = id => (teamIdx.has(id) ? label(teamIdx, id) : '');
+
+    const out = [
+      line(['META', cfg.title, list.length, ms.length, cfg.logo]),
+      line(['C', cfg.start, cfg.matchMin, cfg.semiMin, cfg.finalMode]),
+    ];
+
+    for (const m of ms) {
+      const r = resultOf(m, wo) || [null, null];
+      out.push(line(['M', m.nr, m.round, m.court, m.phase, m.label,
+        m.aRef, name(m.aTeam), m.bRef, name(m.bTeam),
+        r[0], r[1], m.aTeam, m.bTeam, m.status]));
+    }
+
+    for (const b of cfg.breaks || []) out.push(line(['P', b.afterRound, b.min, b.label]));
+
+    for (const row of standings(ms, list, cfg)) {
+      out.push(line(['G', row.group, row.rank, row.id, name(row.id),
+        row.sp, row.s, row.u, row.n, row.diff, row.pkt]));
+    }
+
+    for (const p of placement(ms, list, cfg)) {
+      out.push(line(['E', p.place, name(p.team), p.group, p.origin]));
+    }
+
+    return out;
+  }
+
   // ------------------------------------------------------ delay and promote
 
   /*
@@ -1836,7 +1897,7 @@ const TournamentEngine = (() => {
     conflicts, standings, timeline, currentRound,
     allocation, groupSizes, buckets, plannedFinish,
     draw, groupPhase, circleMethod, endPhase, schedule,
-    resolve, placement, delayPlan, applyMove, enterResult,
+    resolve, placement, webFormat, delayPlan, applyMove, enterResult,
     parseRef, errors, warnings, surnameOf, walkoverScore,
     toMinutes, hhmm,
   };

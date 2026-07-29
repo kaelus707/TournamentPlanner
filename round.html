@@ -12,10 +12,15 @@
   The day-of screen, used one-handed and outdoors, so every control is a thumb
   target and the numbers that matter are the largest things on it.
 
-  There is no sheet here. Build step 9 brings the Apps Script write path; until
-  then the tournament lives in localStorage and is generated on this device.
-  That is enough to work the screen for real and to try a delay against a full
-  30-team schedule, which is what this step is for.
+  Opened as round.html?id=<TABELLEN-ID>&k=<KENNWORT> it works the tournament in
+  the sheet (§2): every change is written through the bound Apps Script and the
+  WEB tab is rewritten with it (§3.4). Opened without them it works a tournament
+  generated on this device and kept in localStorage, which is what build step 8
+  used and what still runs a test tournament without a Google account.
+
+  localStorage stays in the picture either way. It is the copy that survives a
+  dead signal on court 3: a change is saved here first and marked unsent, and
+  the screen keeps saying so until the sheet has it.
 
   Nothing on this screen decides anything by itself. A move is proposed,
   conflicts() runs over the result, and an error throws the move away
@@ -61,6 +66,11 @@ header{
 @media (prefers-color-scheme:dark){header{border-bottom-color:#000}}
 .htop{display:flex;align-items:center;gap:10px;font-size:12.5px;opacity:.92;padding-bottom:6px}
 .htop .ttl{flex:1;min-width:0;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sync{
+  flex:none;border:0;cursor:default;font-family:inherit;font-size:11px;font-weight:800;
+  padding:4px 9px;border-radius:999px;background:rgba(255,255,255,.18);color:#fff;
+}
+.sync.bad{background:#fff;color:var(--red);cursor:pointer}
 .hnav{display:flex;align-items:center;gap:10px}
 .hnav .rd{flex:1;min-width:0}
 .hnav .rd .big{font-size:23px;font-weight:800;letter-spacing:-.3px}
@@ -187,6 +197,7 @@ footer{text-align:center;color:var(--tx3);font-size:11.5px;padding:26px 0 10px;l
   <div class="wrap">
     <div class="htop">
       <span class="ttl" id="title"></span>
+      <button class="sync" id="sync" type="button" hidden></button>
       <span id="played"></span>
     </div>
     <div class="hnav">
@@ -207,18 +218,34 @@ footer{text-align:center;color:var(--tx3);font-size:11.5px;padding:26px 0 10px;l
   <div id="courts"></div>
   <div id="setup" hidden></div>
   <footer id="foot" hidden>
-    Rundenblatt · Änderungen bleiben auf diesem Gerät.<br>
-    <button class="btn ghost" id="reset" style="margin-top:10px;min-width:auto">Turnier verwerfen</button>
+    <span id="footnote"></span><br>
+    <button class="btn ghost" id="reset" style="margin-top:10px;min-width:auto"></button>
   </footer>
 </main>
 
 <script src="engine.js"></script>
+<script src="sheet.js"></script>
 <script>
 'use strict';
 
 const E = TournamentEngine;
+const S = TournamentSheet;
 const $ = s => document.querySelector(s);
-const KEY = 'tp.tournament';
+
+/*
+ * §2: `id` picks the tournament, `k` is the admin secret. Without them the
+ * screen runs the device-local tournament of build step 8 instead, which is
+ * still the quickest way to try the format out.
+ */
+const params = new URLSearchParams(location.search);
+const SHEET_ID = (params.get('id') || '').trim();
+const TOKEN = (params.get('k') || '').trim();
+
+/* One cache per tournament, so two sheets on one phone cannot overwrite each
+ * other — and the local-only tournament keeps the key it already had. */
+const KEY = SHEET_ID ? 'tp.tournament.' + SHEET_ID : 'tp.tournament';
+const DIRTY_KEY = KEY + '.dirty';
+const ENDPOINT_KEY = 'tp.endpoint.' + SHEET_ID;
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -241,10 +268,24 @@ let openNr = null;
 let delaying = false;
 let messages = [];
 
+/*
+ * The sheet half. `endpoint` is null until it is known, and null is also what
+ * local mode looks like — so every write path asks the same question and there
+ * is no second mode flag to keep in step.
+ *
+ * `dirty` means "this device has a change the sheet has not got". It is stored,
+ * not only held in memory: a phone that dies between the tap and the write must
+ * come back knowing there is something to send.
+ */
+let endpoint = null;
+let sync = { busy: false, dirty: false, error: null, at: null };
+let waiting = null;      // teams and config read from a sheet with no schedule
+
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
     T = raw ? JSON.parse(raw) : null;
+    sync.dirty = localStorage.getItem(DIRTY_KEY) === '1';
   } catch (err) {
     T = null;
     console.warn('Gespeichertes Turnier unlesbar:', err);
@@ -254,9 +295,48 @@ function load() {
 function save() {
   try {
     localStorage.setItem(KEY, JSON.stringify(T));
+    localStorage.setItem(DIRTY_KEY, sync.dirty ? '1' : '0');
   } catch (err) {
     messages = [{ severity: 'error', message: 'Speichern fehlgeschlagen: ' + err.message }];
   }
+}
+
+/**
+ * §3.4: the sheet gets the changed rows and a freshly written WEB tab.
+ *
+ * The loop is what makes rapid taps cheap — a change entered while a write is
+ * in flight raises `dirty` again and is picked up on the next turn instead of
+ * queueing a second request. A failure stops the loop and leaves `dirty`
+ * standing, which is what the pill in the header is showing.
+ */
+async function push() {
+  if (!SHEET_ID || !T || sync.busy) return;
+  if (!endpoint) {
+    // Not silence: `dirty` is already set, so the change is safe here and the
+    // screen has to say why it is going no further.
+    sync.error = 'Die Adresse der Tabelle („endpoint“) ist nicht bekannt.';
+    render();
+    return;
+  }
+  sync.busy = true;
+  sync.error = null;
+  render();
+
+  while (sync.dirty) {
+    try {
+      await S.writeState(endpoint, TOKEN, T.matches,
+        E.webFormat(T.matches, T.teams, T.config));
+      sync.dirty = false;
+      sync.at = clock();
+      save();
+    } catch (err) {
+      sync.error = err.message;
+      break;
+    }
+  }
+
+  sync.busy = false;
+  render();
 }
 
 /** The device clock, as the HH:MM stamp §3.3 wants. The engine never reads it. */
@@ -325,7 +405,11 @@ function commit(matches, okMessage) {
     return false;
   }
   T.matches = matches;
+  // Local first, then the sheet. If the write fails the change is still here
+  // and still marked unsent, which is the whole point of doing it in that order.
+  sync.dirty = !!SHEET_ID;
   save();
+  push();
   messages = E.warnings(issues);
   if (okMessage) messages = [{ severity: 'ok', message: okMessage }].concat(messages);
   return true;
@@ -383,11 +467,53 @@ function renderHeader(rows, row) {
 
   const current = E.currentRound(rows);
   $('#jump').hidden = !current || current.round === shown;
+  renderSync();
+}
+
+/**
+ * §2: what the sheet knows, in the one place a thumb already looks.
+ *
+ * "wartet" is a state that should not last: push() runs on its own. It is shown
+ * rather than hidden because a change that is only on this phone is exactly the
+ * thing an organizer must not find out about at the end of the day.
+ */
+function renderSync() {
+  const pill = $('#sync');
+  pill.hidden = !SHEET_ID;
+  if (!SHEET_ID) return;
+  pill.classList.toggle('bad', !!sync.error || sync.dirty);
+  pill.textContent = sync.busy ? 'sichern …'
+    : sync.error ? 'nicht gesichert'
+    : sync.dirty ? 'wartet …'
+    : sync.at ? 'gesichert ' + sync.at
+    : 'Tabelle';
 }
 
 function renderMessages() {
   const box = $('#messages');
   box.textContent = '';
+
+  if (sync.error) {
+    const note = el('div', 'note bad');
+    const body = el('div');
+    body.append(el('strong', null, 'Nicht in die Tabelle geschrieben:'));
+    body.append(el('div', null, sync.error));
+    body.append(el('div', null,
+      'Die Eingabe steht auf diesem Gerät und geht nicht verloren.'));
+    // The one failure the organizer can fix from here: §2 puts the deployment
+    // URL in `Config`, and a sheet that publishes only `WEB` — which is how the
+    // token is kept out of public view — cannot be asked for it.
+    if (!endpoint) body.append(endpointField());
+
+    const retry = el('button', 'btn', 'Erneut senden');
+    retry.type = 'button';
+    retry.style.marginTop = '8px';
+    retry.addEventListener('click', push);
+    body.append(retry);
+    note.append(body);
+    box.append(note);
+  }
+
   if (!messages.length) return;
 
   const block = (list, cls, title) => {
@@ -576,11 +702,16 @@ function proposals(m, names) {
 }
 
 function render() {
-  if (!T) return renderSetup();
+  if (!T) return SHEET_ID ? renderSheetSetup() : renderSetup();
 
   $('#head').hidden = false;
   $('#foot').hidden = false;
   $('#setup').hidden = true;
+
+  $('#footnote').textContent = SHEET_ID
+    ? 'Rundenblatt · Jede Eingabe geht in die Google-Tabelle.'
+    : 'Rundenblatt · Änderungen bleiben auf diesem Gerät.';
+  $('#reset').textContent = SHEET_ID ? 'Neu aus der Tabelle laden' : 'Turnier verwerfen';
 
   const rows = E.timeline(T.matches, T.config);
   const row = rows.find(r => r.round === shown);
@@ -599,12 +730,155 @@ function render() {
   for (const m of ms) box.append(courtCard(m, names));
 }
 
-/* ---------- Einrichtung ---------- */
+/* ---------- Einrichtung aus der Tabelle ---------- */
+
+/**
+ * A field for the deployment URL, remembered on this device.
+ *
+ * §2 says the URL lives in `Config`, and that is where it is looked for first.
+ * This is the way out when `Config` is not publicly readable — which is the
+ * arrangement sheet/ANLEITUNG.md recommends, because the token sits in the same
+ * tab and publishing only `WEB` is what keeps it out of a stranger's browser.
+ */
+function endpointField() {
+  const box = el('div', 'field');
+  box.style.marginTop = '10px';
+
+  const input = el('input');
+  input.type = 'url';
+  input.id = 'endpoint';
+  input.placeholder = 'https://script.google.com/macros/s/…/exec';
+  input.value = localStorage.getItem(ENDPOINT_KEY) || '';
+
+  const label = el('label', null, 'Adresse der Tabelle (aus „Config“, Schlüssel „endpoint“)');
+  label.htmlFor = input.id;
+
+  const use = el('button', 'btn', 'Adresse merken und laden');
+  use.type = 'button';
+  use.style.marginTop = '8px';
+  use.addEventListener('click', () => {
+    const value = input.value.trim();
+    if (!value) return;
+    localStorage.setItem(ENDPOINT_KEY, value);
+    endpoint = value;
+    sync.error = null;
+    boot();
+  });
+
+  box.append(label, input, use);
+  return box;
+}
+
+/**
+ * §9.3, as much of it as a tournament day needs: the sheet already carries
+ * `Config` and `Teams`, so the only thing left to decide is the draw.
+ *
+ * Even that is stored data (§3.2). A `Teams` tab whose `group` column is
+ * already filled is taken exactly as it stands — the organizer who typed those
+ * letters in meant them, and redrawing over them would be the app deciding
+ * something it was not asked to decide.
+ */
+function renderSheetSetup() {
+  $('#head').hidden = true;
+  $('#foot').hidden = true;
+  $('#courts').textContent = '';
+  renderMessages();
+
+  const box = $('#setup');
+  box.hidden = false;
+  box.textContent = '';
+
+  const card = el('div', 'setup');
+  box.append(card);
+
+  if (!waiting) {
+    card.append(el('h2', null, 'Turnier wird geladen …'));
+    card.append(el('p', null, 'Die Tabelle wird gelesen. Das dauert einen Moment.'));
+    if (!endpoint && !sync.error) card.append(endpointField());
+    return;
+  }
+
+  const config = waiting.config;
+  const teams = waiting.teams;
+  const drawn = teams.length > 0 && teams.every(t => t.group);
+
+  card.append(el('h2', null, config.title || 'Turnier'));
+  card.append(el('p', null, drawn
+    ? 'Die Gruppen stehen schon im Blatt „Teams“ und bleiben, wie sie sind. '
+      + 'Es fehlt nur noch der Spielplan.'
+    : 'Im Blatt „Spielplan“ steht noch nichts. Auslosung und Spielplan entstehen '
+      + 'aus dem Blatt „Teams“ und werden dorthin zurückgeschrieben.'));
+
+  const preview = el('div', 'preview');
+  const a = E.allocation(Object.assign({ teams: teams.length }, config));
+  if (!a.ok) {
+    for (const p of a.problems) preview.append(el('div', null, p.message));
+  } else {
+    const line = el('div');
+    line.append(document.createTextNode(
+      `${a.teams} Teams · Gruppen ${a.groups.map(g => g.size).join('/')} · `));
+    line.append(el('b', null, `${a.matches} Spiele in ${a.rounds} Runden`));
+    preview.append(line);
+    preview.append(el('div', null, a.finish == null
+      ? `Finale ab ${E.hhmm(a.finalStart)} Uhr, offenes Ende`
+      : `Ende gegen ${E.hhmm(a.finish)} Uhr`));
+    preview.append(el('div', null, `${config.courts} Plätze · Beginn ${config.start} Uhr`));
+  }
+  card.append(preview);
+
+  const go = el('button', 'btn main', drawn
+    ? 'Spielplan erzeugen und in die Tabelle schreiben'
+    : 'Auslosen, Spielplan erzeugen und in die Tabelle schreiben');
+  go.type = 'button';
+  go.disabled = !a.ok || !endpoint;
+  go.style.marginTop = '12px';
+  card.append(go);
+
+  if (!endpoint) card.append(endpointField());
+
+  go.addEventListener('click', async () => {
+    const list = drawn ? teams : E.draw(teams, config);
+    const plan = E.schedule(list, config);
+    const matches = E.resolve(plan.matches, list, config);
+
+    // §7 runs before anything is written, here as everywhere else.
+    const issues = E.conflicts(matches, list, config);
+    if (E.errors(issues).length) {
+      messages = E.errors(issues);
+      render();
+      return;
+    }
+
+    go.disabled = true;
+    go.textContent = 'wird geschrieben …';
+    try {
+      await S.writePlan(endpoint, TOKEN, list, matches,
+        E.webFormat(matches, list, config));
+    } catch (err) {
+      messages = [{ severity: 'error', message: 'Schreiben fehlgeschlagen: ' + err.message }];
+      render();
+      return;
+    }
+
+    T = { config, teams: list, matches };
+    waiting = null;
+    shown = 1;
+    openNr = null;
+    delaying = false;
+    sync.dirty = false;
+    sync.at = clock();
+    save();
+    messages = E.warnings(issues);
+    render();
+  });
+}
+
+/* ---------- Einrichtung ohne Tabelle ---------- */
 
 /*
- * Build step 9 replaces all of this with the sheet. Until then the tournament
- * is generated here, which is enough to work the round screen against a real
- * schedule rather than a toy one.
+ * The device-local tournament of build step 8. It is not dead code: a format
+ * can be tried out on a train with it, and it is what the round screen is
+ * developed against without a Google account in the way.
  */
 const DEFAULTS = {
   title: 'Turnier', courts: 5, start: '09:00', matchMin: 10, semiMin: 12,
@@ -744,25 +1018,97 @@ const goTo = round => {
   render();
 };
 
+/** §9.1: the first incomplete round, or the last one once everything is played. */
+const currentRoundNr = () => {
+  const current = E.currentRound(E.timeline(T.matches, T.config));
+  return current ? current.round : lastRound();
+};
+
+/**
+ * §2: find the endpoint, read the sheet, show the round that is being played.
+ *
+ * The order of the two sources is the whole point. The sheet is the tournament,
+ * so it wins — except over a change this device made and never managed to send,
+ * which exists nowhere else and is pushed instead of being overwritten. And if
+ * the sheet cannot be reached at all, the cached copy is still a working round
+ * screen: a signal that drops at 11:40 must not end the tournament.
+ */
+async function boot() {
+  load();
+
+  if (!SHEET_ID) {
+    if (T) shown = currentRoundNr();
+    render();
+    return;
+  }
+
+  waiting = null;
+  messages = [];
+  render();
+
+  try {
+    endpoint = localStorage.getItem(ENDPOINT_KEY) || await S.findEndpoint(SHEET_ID);
+    localStorage.setItem(ENDPOINT_KEY, endpoint);
+
+    const data = await S.load(endpoint);
+
+    if (!data.matches.length) {
+      waiting = data;
+      T = null;
+    } else if (sync.dirty && T) {
+      messages = [{ severity: 'warning',
+        message: 'Auf diesem Gerät liegt eine Eingabe, die die Tabelle noch nicht hat. '
+               + 'Sie wird jetzt gesendet, die Tabelle wird danach nicht neu gelesen.' }];
+      shown = currentRoundNr();
+      push();
+    } else {
+      T = {
+        config: data.config,
+        teams: data.teams,
+        matches: E.resolve(data.matches, data.teams, data.config),
+      };
+      sync.dirty = false;
+      sync.at = clock();
+      save();
+      messages = E.warnings(E.conflicts(T.matches, T.teams, T.config));
+      shown = currentRoundNr();
+    }
+  } catch (err) {
+    messages = [{ severity: 'error', message: 'Die Tabelle ist nicht erreichbar: ' + err.message }];
+    if (T) {
+      messages.push({ severity: 'warning',
+        message: 'Es geht mit der zuletzt geladenen Fassung auf diesem Gerät weiter. '
+               + 'Eingaben werden gemerkt und später gesendet.' });
+      shown = currentRoundNr();
+    }
+  }
+
+  render();
+}
+
 $('#prev').addEventListener('click', () => goTo(Math.max(1, shown - 1)));
 $('#next').addEventListener('click', () => goTo(Math.min(lastRound(), shown + 1)));
-$('#jump').addEventListener('click', () => {
-  const current = E.currentRound(E.timeline(T.matches, T.config));
-  goTo(current ? current.round : lastRound());
-});
+$('#jump').addEventListener('click', () => goTo(currentRoundNr()));
+$('#sync').addEventListener('click', () => { if (sync.error || sync.dirty) push(); });
 $('#reset').addEventListener('click', () => {
+  // With a sheet behind it, "verwerfen" can only mean "read it again": the
+  // tournament is not on this device to be thrown away.
+  if (SHEET_ID) {
+    localStorage.removeItem(KEY);
+    localStorage.removeItem(DIRTY_KEY);
+    T = null;
+    sync = { busy: false, dirty: false, error: null, at: null };
+    boot();
+    return;
+  }
   localStorage.removeItem(KEY);
+  localStorage.removeItem(DIRTY_KEY);
   T = null;
   messages = [];
   render();
 });
 
-load();
-if (T) {
-  const current = E.currentRound(E.timeline(T.matches, T.config));
-  shown = current ? current.round : lastRound();
-}
-render();
+boot();
 </script>
 </body>
 </html>

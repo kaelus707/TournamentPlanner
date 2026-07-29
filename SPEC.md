@@ -547,18 +547,34 @@ and tested first, against the 2026 data as a known-good fixture.
 
 ## 8. `WEB` output format
 
-Unchanged in spirit from the 2026 build; two changes to the `M` line.
+Unchanged in spirit from the 2026 build; two changes to the `M` line, one wider
+`P` line and one new line.
 
 ```
 META|<title>|<teams>|<matches>|<logo>
+C|<start>|<matchMin>|<semiMin>|<finalMode>
 M|<nr>|<round>|<court>|<phase>|<label>|<aRef>|<aTeam>|<bRef>|<bTeam>|<sa>|<sb>|<aCode>|<bCode>|<status>
-P|<afterRound>|<label>
+P|<afterRound>|<min>|<label>
 G|<group>|<rank>|<code>|<team>|<sp>|<s>|<u>|<n>|<diff>|<pkt>
 E|<place>|<team>|<group>|<origin>
 ```
 
 Changes from v1: `zeit` is replaced by `round`; `status` is appended; `P` lines
-carry a round index instead of a time string.
+carry a round index and the break's length instead of a time string; and the
+`C` line is new.
+
+`C` exists because §9.1 asks the viewer to compute times from `round`, and the
+inputs §6.1 needs to do that have nowhere else to come from. `Config` is not an
+alternative: it holds the admin token, so the public viewer must never read it.
+`C` therefore carries the four timing values and nothing else — never `token`,
+never `endpoint`. `P` gained `min` for the same reason: `plannedStart` needs the
+length of a break, not only its position.
+
+`<aTeam>` / `<bTeam>` are display names and `<aCode>` / `<bCode>` the team ids,
+as in the 2026 build. `<sa>` / `<sb>` are the scores a table would count, so a
+walkover appears as the configured score (§5.4): the format has no walkover
+field, and writing the abandoned partial score would contradict the `G` lines
+computed from the same match.
 
 **Treat this format as a contract.** It is the seam between engine and viewer.
 Keeping it stable is what allows the engine to be rewritten without touching

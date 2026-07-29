@@ -21,6 +21,7 @@ const SUITES = [
   { name: 'groupPhase()', suite: require('./groupphase.test.js') },
   { name: 'endPhase()',   suite: require('./endphase.test.js') },
   { name: 'resolve()',    suite: require('./resolve.test.js') },
+  { name: 'webFormat()',  suite: require('./sheet.test.js') },
 ];
 
 const web = fixture('bc2026-web.csv');
