@@ -7,6 +7,7 @@
  * allocation({ teams, courts, … })   the duration preview of §5.2
  * schedule(teams, config)            the whole plan of §5.3 and §5.5
  * resolve(matches, teams, config)    the reference resolution of §6.3
+ * refLabel(ref, matches)             the German label behind an open slot, §6.3
  * placement(matches, teams, config)  the final table of §8
  * delayPlan(matches, teams, cfg, nr) the move proposal of §6.2
  *
@@ -97,6 +98,34 @@ const TournamentEngine = (() => {
     if (p[0] === 'L' && p.length === 2 && isInt(p[1])) return { kind: 'L', src: +p[1] };
     if (p[0] === 'B' && p.length === 3 && isInt(p[1]) && isInt(p[2])) return { kind: 'B', bucket: +p[1], rank: +p[2] };
     return { kind: 'bad' };
+  }
+
+  /**
+   * §6.3: the human label behind an unresolved slot — "Sieger Viertelfinale 2",
+   * the same wording the 2026 sheet used, because it is what the organizer says
+   * out loud when calling the match onto court.
+   *
+   * Two matches can carry the same label: both halves of a placement round do.
+   * Then the label alone names two different teams, so the match number is
+   * appended — "Sieger Platzierungsrunde Platz 13–16 (#111)". It is only added
+   * where it is needed, because a number on every line reads like a form.
+   *
+   * `matches` is only read to name a `W:`/`L:` source, so a caller with no
+   * schedule to hand may omit it and still get a label for every other form.
+   */
+  function refLabel(ref, matches) {
+    const ms = matches || [];
+    const p = parseRef(ref);
+    if (p.kind === 'G') return `${p.rank}. Gruppe ${p.group}`;
+    if (p.kind === 'B') return `${p.rank}. aus Topf ${p.bucket}`;
+    if (p.kind === 'W' || p.kind === 'L') {
+      const what = p.kind === 'W' ? 'Sieger' : 'Verlierer';
+      const src = ms.find(m => m.nr === p.src);
+      if (!src) return `${what} Spiel ${p.src}`;
+      const shared = ms.filter(m => m.label === src.label).length > 1;
+      return `${what} ${src.label}` + (shared ? ` (#${src.nr})` : '');
+    }
+    return 'offen';
   }
 
   // ---------------------------------------------------------------- checks
@@ -1898,7 +1927,7 @@ const TournamentEngine = (() => {
     allocation, groupSizes, buckets, plannedFinish,
     draw, groupPhase, circleMethod, endPhase, schedule,
     resolve, placement, webFormat, delayPlan, applyMove, enterResult,
-    parseRef, errors, warnings, surnameOf, walkoverScore,
+    parseRef, refLabel, errors, warnings, surnameOf, walkoverScore,
     toMinutes, hhmm,
   };
 })();

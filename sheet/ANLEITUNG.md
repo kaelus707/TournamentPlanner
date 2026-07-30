@@ -112,6 +112,15 @@ Wird nur `WEB` veröffentlicht, fragt das Rundenblatt einmal nach der Adresse au
 
 ## 6. Aufrufen
 
+Alle fünf Dateien gehören in **denselben Ordner**:
+
+```
+index.html    round.html    engine.js    viewer.js    sheet.js
+```
+
+Es gibt keinen Build-Schritt — die Dateien werden so hochgeladen, wie sie sind.
+Fehlt eine, sagen die Seiten das beim Öffnen.
+
 | Wer | Adresse |
 |---|---|
 | Zuschauer | `…/index.html?id=TABELLEN-ID` |

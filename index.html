@@ -128,6 +128,11 @@ nav button.act{background:var(--bg);color:var(--tx)}
   padding:4px 9px;border-radius:999px;background:var(--live);color:#fff}
 @media (prefers-color-scheme:dark){.slot .tag{color:#2a0000}}
 .slot .tag.done{background:var(--line);color:var(--tx3)}
+/* §6.1: der Verzug, nur wenn es einen gibt */
+.slot .dl{font-size:11px;font-weight:800;font-variant-numeric:tabular-nums;
+  padding:3px 8px;border-radius:999px;background:var(--acc-s);color:var(--acc);white-space:nowrap}
+.slot .dl.early{background:var(--ink-s);color:var(--tx2)}
+.slot .rn{flex:none;font-size:11px;font-weight:700;color:var(--tx3);white-space:nowrap}
 
 .pause{
   margin:14px 0;padding:10px 13px;border-radius:12px;border:1px dashed var(--line);
@@ -140,6 +145,15 @@ nav button.act{background:var(--bg);color:var(--tx)}
 }
 .m.now{border-color:var(--live);border-left:4px solid var(--live)}
 .m.done{opacity:.97}
+/* §9.1: ein laufendes Spiel sieht anders aus als ein offenes */
+.m.live{border-color:var(--live);border-left:4px solid var(--live);
+  box-shadow:0 1px 2px rgba(0,0,0,.07),0 4px 14px rgba(164,22,26,.16)}
+.mh .run{flex:none;display:inline-flex;align-items:center;gap:5px;
+  font-size:10.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
+  padding:3px 9px;border-radius:999px;background:var(--live);color:#fff}
+@media (prefers-color-scheme:dark){.mh .run{color:#2a0000}}
+.mh .run::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;
+  animation:pulse 1.8s infinite}
 .mh{display:flex;align-items:center;gap:7px;padding:8px 12px 6px;font-size:11.5px;color:var(--tx2);flex-wrap:wrap}
 .nr{font-weight:800;color:var(--tx3);font-variant-numeric:tabular-nums}
 .pl{font-weight:700;background:var(--ink-s);color:var(--ink);padding:2px 8px;border-radius:6px}
@@ -273,6 +287,8 @@ footer{text-align:center;color:var(--tx3);font-size:11.5px;padding:26px 0 10px;l
   </footer>
 </main>
 
+<script src="engine.js"></script>
+<script src="viewer.js"></script>
 <script>
 /* ══════════════════════════════════════════════════════════════════
    ▼▼▼  KONFIGURATION – hier die ID der Google-Tabelle eintragen  ▼▼▼
@@ -288,58 +304,33 @@ const TAB   = "WEB";         // Name des Blatts mit den Web-Daten
 const AUTO  = 20000;         // Auto-Aktualisierung in ms
 /* ══════════════════════════════════════════════════════════════════ */
 
+/*
+ * This file is the screen. Everything that is not a DOM node lives in viewer.js
+ * (reading §8, building the blocks) and engine.js (§6.1, the times), so the page
+ * below only ever formats what it is handed. Two <script> tags instead of one
+ * file — no build step either way.
+ *
+ * Both modules are tested for by name rather than as window properties: a
+ * top-level `const` in a classic <script> is script-scoped and never lands on
+ * window, so `window.TournamentEngine` would always be undefined.
+ */
+const E = typeof TournamentEngine !== "undefined" ? TournamentEngine : null;
+const V = typeof TournamentViewer !== "undefined" ? TournamentViewer : null;
+
 const $ = s => document.querySelector(s);
 const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 const src = new URLSearchParams(location.search).get("id") || SHEET;
-let D = {matches:[], groups:{}, ranks:[], title:"Bonsai Cup 2026"};
+/* Leer, bis geladen wird — nicht V.parseWeb(""), damit die Seite auch dann
+   noch etwas anzeigen kann, wenn viewer.js gar nicht da ist. */
+let D = {title:"", logo:"", config:{start:"",matchMin:0,semiMin:0,finalMode:"",breaks:[]},
+         matches:[], groups:{}, ranks:[]};
 let filter = "jetzt", query = "", view = "spiele", loaded = false, busy = false;
 
 /* ---------- Datenquelle ---------- */
 function url(){
   if(/^https?:\/\//.test(src)) return src;
   return `https://docs.google.com/spreadsheets/d/${src}/gviz/tq?tqx=out:csv&headers=0&sheet=${encodeURIComponent(TAB)}`;
-}
-
-/* ---------- CSV ---------- */
-function csv(t){
-  const rows=[]; let f="", r=[], q=false;
-  for(let i=0;i<t.length;i++){
-    const c=t[i];
-    if(q){ if(c==='"'){ if(t[i+1]==='"'){f+='"';i++;} else q=false; } else f+=c; }
-    else if(c==='"') q=true;
-    else if(c===','){ r.push(f); f=""; }
-    else if(c==='\n'){ r.push(f); rows.push(r); r=[]; f=""; }
-    else if(c!=='\r') f+=c;
-  }
-  if(f!==""||r.length){ r.push(f); rows.push(r); }
-  return rows;
-}
-
-function parse(text){
-  const d={matches:[],groups:{},ranks:[],title:"Bonsai Cup 2026"};
-  for(const row of csv(text)){
-    const line=(row[0]||"").trim();
-    if(!line) continue;
-    const p=line.split("|");
-    switch(p[0]){
-      case "META": if(p[1]) d.title=p[1]; break;
-      case "M": d.matches.push({
-          kind:"m", nr:+p[1]||0, zeit:p[2]||"", platz:p[3]||"", phase:p[4]||"", runde:p[5]||"",
-          hA:p[6]||"", tA:p[7]||"", hB:p[8]||"", tB:p[9]||"",
-          eA:p[10]===""?null:+p[10], eB:p[11]===""?null:+p[11], cA:p[12]||"", cB:p[13]||""
-        }); break;
-      case "P": d.matches.push({kind:"p", text:(p.slice(1).join("|")||"").replace(/^[⏸\s]+/,"").trim()}); break;
-      case "G": (d.groups[p[1]] ||= []).push({
-          rang:+p[2]||99, code:p[3]||"", team:p[4]||"", sp:p[5]||"0", s:p[6]||"0",
-          u:p[7]||"0", n:p[8]||"0", diff:p[9]||"0", pkt:p[10]||"0"
-        }); break;
-      case "E": d.ranks.push({platz:+p[1]||0, team:p[2]||"", gruppe:p[3]||"", herkunft:p[4]||""}); break;
-    }
-  }
-  for(const k in d.groups) d.groups[k].sort((a,b)=>a.rang-b.rang);
-  d.ranks.sort((a,b)=>a.platz-b.platz);
-  return d;
 }
 
 /* ---------- Laden ---------- */
@@ -353,42 +344,33 @@ async function load(manual){
     const txt=await res.text();
     if(/^\s*</.test(txt) || /google\.visualization\.Query/.test(txt))
       throw new Error("Die Tabelle ist nicht öffentlich freigegeben.");
-    const d=parse(txt);
+    const d=V.parseWeb(txt);
     if(!d.matches.length) throw new Error("Im Blatt „"+TAB+"“ wurden keine Spiele gefunden.");
     D=d; loaded=true; render(); ok();
   }catch(e){
     if(loaded) warn(e.message); else showError(e.message);
   }finally{ busy=false; setTimeout(()=>btn.classList.remove("spin"),400); }
 }
-function hhmm(){ return new Date().toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}); }
+function now(){ return new Date().toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}); }
 function ok(){
-  const live=D.matches.some(m=>m.kind==="m"&&m.eA!==null) && !allDone();
+  const s=V.summary(D);
+  /* A court actually running is the strongest signal; otherwise "started but
+     not finished" is enough to call the page live. */
+  const live=s.playing>0 || (s.done>0 && s.current);
   $("#dot").className="dot"+(live?" on":"");
-  $("#stat").textContent=(live?"Live · ":"")+"Stand "+hhmm();
-  $("#ttl").textContent=D.title;
+  $("#stat").textContent=(live?"Live · ":"")+"Stand "+now();
+  if(D.title) $("#ttl").textContent=D.title;
 }
-function warn(msg){ $("#dot").className="dot err"; $("#stat").textContent="Offline – Stand "+hhmm(); console.warn(msg); }
-function allDone(){ const ms=D.matches.filter(m=>m.kind==="m"); return ms.length>0 && ms.every(m=>m.eA!==null&&m.eB!==null); }
+function warn(msg){ $("#dot").className="dot err"; $("#stat").textContent="Offline – Stand "+now(); console.warn(msg); }
 
 /* ---------- Ableitungen ---------- */
-const played = m => m.eA!==null && m.eB!==null;
-function blocks(){
-  const out=[]; let cur=null;
-  for(const it of D.matches){
-    if(it.kind==="p"){ out.push({pause:it.text}); cur=null; continue; }
-    if(!cur || cur.zeit!==it.zeit){ cur={zeit:it.zeit,items:[]}; out.push(cur); }
-    cur.items.push(it);
-  }
-  return out;
+
+/** §6.1's drift, as the "+2 Min" the round header and the status card show. */
+function drift(delta){
+  if(!delta) return "";
+  return (delta>0?"+":"−")+Math.abs(delta)+" Min";
 }
-function currentIdx(bs){
-  for(let i=0;i<bs.length;i++) if(bs[i].items && bs[i].items.some(m=>!played(m))) return i;
-  return -1;
-}
-function hit(m,q){
-  if(!q) return true;
-  return (m.tA+" "+m.tB+" "+m.cA+" "+m.cB+" "+m.hA+" "+m.hB+" "+m.runde).toLowerCase().includes(q);
-}
+
 function hl(s,q){
   const e=esc(s);
   if(!q) return e;
@@ -400,70 +382,103 @@ function hl(s,q){
 function render(){ renderStatus(); renderList(); renderGroups(); renderRanks(); }
 
 function renderStatus(){
-  const ms=D.matches.filter(m=>m.kind==="m");
-  const done=ms.filter(played).length, tot=ms.length;
-  const bs=blocks(), ci=currentIdx(bs);
-  const now = ci>=0 ? bs[ci] : null;
+  const s=V.summary(D);
+  const cur=s.current;
+  const time=cur?E.hhmm(cur.start):"";
+  const late=cur?drift(cur.delta):"";
   let big, small;
-  if(!tot){ big="Keine Spiele"; small=""; }
-  else if(!now){ big="Turnier beendet"; small="Alle "+tot+" Spiele gespielt"; }
-  else if(done===0){ big="Turnier startet um "+now.zeit+" Uhr"; small=tot+" Spiele · 30 Teams · 4 Gruppen"; }
-  else { big="Jetzt am Platz: "+now.zeit+" Uhr"; small=done+" von "+tot+" Spielen gespielt"; }
+
+  if(!s.total){ big="Keine Spiele"; small=""; }
+  else if(!cur){ big="Turnier beendet"; small="Alle "+s.total+" Spiele gespielt"; }
+  else if(s.done===0){
+    big=time?"Turnier startet um "+time+" Uhr":"Turnier startet";
+    small=s.total+" Spiele in "+s.rounds+" Runden";
+  } else {
+    /* §6.1: the live start, and the drift only when there is any. */
+    big="Jetzt: Runde "+cur.round+(time?" · "+time+" Uhr":"")+(late?" · "+late:"");
+    small=s.done+" von "+s.total+" Spielen gespielt";
+  }
+  if(cur && s.playing) small+=" · "+s.playing+(s.playing===1?" Spiel läuft":" Spiele laufen");
+
   $("#status").innerHTML=`<div class="status">
     <div class="txt"><div class="big">${esc(big)}</div>${small?`<div class="small">${esc(small)}</div>`:""}
-      <div class="bar"><i style="width:${tot?Math.round(done/tot*100):0}%"></i></div></div>
-    ${now?`<button class="jump" id="jmp">Zu den<br>Spielen</button>`:""}
+      <div class="bar"><i style="width:${s.total?Math.round(s.done/s.total*100):0}%"></i></div></div>
+    ${cur?`<button class="jump" id="jmp">Zu den<br>Spielen</button>`:""}
   </div>`;
   const j=$("#jmp");
   if(j) j.onclick=()=>{
     if(filter!=="jetzt"&&filter!=="alle"){ setFilter("jetzt"); }
-    setTimeout(()=>{ const el=document.querySelector(".slot.cur"); if(el) el.scrollIntoView({behavior:"smooth",block:"center"}); },60);
+    setTimeout(()=>{ const el=document.querySelector(".slot.now"); if(el) el.scrollIntoView({behavior:"smooth",block:"center"}); },60);
   };
 }
 
 function renderList(){
   const q=query.trim().toLowerCase();
   const f = (q && filter==="jetzt") ? "alle" : filter;   // Suche zeigt immer alle Spiele des Teams
-  const bs=blocks(), ci=currentIdx(bs);
-  let html="", shown=0;
-  bs.forEach((b,i)=>{
-    if(b.pause){
-      if(q||f==="fertig"||f==="gruppe"||f==="endrunde") return;
-      if(f==="jetzt" && ci>=0 && i<ci) return;
-      html+=`<div class="pause"><span>⏸</span><span>${esc(b.pause)}</span></div>`;
-      return;
+  const cur=V.summary(D).current;
+  const from=cur?cur.round:0;          // 0 = nichts mehr offen, „Live“ zeigt alles
+  let html="", shown=0, seen=0;        // seen = letzte gezeichnete Runde, für die Pausen
+
+  for(const b of V.blocks(D)){
+    if(b.kind==="break"){
+      if(q||f==="fertig"||f==="gruppe"||f==="endrunde") continue;
+      if(f==="jetzt" && seen<from) continue;
+      const when=b.from?`${esc(b.from)}–${esc(b.to)} · `:"";
+      html+=`<div class="pause"><span>⏸</span><span>${when}${esc(b.label)} (${b.min} Min)</span></div>`;
+      continue;
     }
-    let items=b.items.filter(m=>hit(m,q));
-    if(f==="gruppe")   items=items.filter(m=>m.phase==="Gruppenphase");
-    if(f==="endrunde") items=items.filter(m=>m.phase!=="Gruppenphase");
-    if(f==="fertig")   items=items.filter(played);
-    if(f==="jetzt" && ci>=0 && i<ci) items=[];
-    if(!items.length) return;
-    const st = i===ci ? "cur" : (i<ci||ci<0 ? "done" : "next");
-    html+=`<div class="slot ${st}"><span class="t">${esc(b.zeit)} Uhr</span>
-      ${st==="cur"?'<span class="tag">Jetzt</span>':""}
-      ${st==="done"?'<span class="tag done">Gespielt</span>':""}
-      <span class="l"></span></div>`;
-    for(const m of items){ html+=card(m,st==="cur",q); shown++; }
-  });
+
+    seen=b.round;
+    if(f==="jetzt" && b.round<from) continue;
+
+    let items=b.items.filter(m=>V.hit(D.matches,m,q));
+    if(f==="gruppe")   items=items.filter(m=>m.phase==="Gruppe");
+    if(f==="endrunde") items=items.filter(m=>m.phase!=="Gruppe");
+    if(f==="fertig")   items=items.filter(V.isDone);
+    if(!items.length) continue;
+
+    const late=drift(b.delta);
+    html+=`<div class="slot ${b.state}">
+      <span class="t">${b.time?esc(b.time)+" Uhr":"Runde "+b.round}</span>
+      ${b.state==="now"?'<span class="tag">Jetzt</span>':""}
+      ${b.state==="done"?'<span class="tag done">Gespielt</span>':""}
+      ${late?`<span class="dl ${b.delta>0?"late":"early"}">${esc(late)}</span>`:""}
+      <span class="l"></span>
+      <span class="rn">Runde ${b.round}</span></div>`;
+    for(const m of items){ html+=card(m,b.state,q); shown++; }
+  }
+
   $("#list").innerHTML = shown ? html :
     `<div class="empty">${q?`Keine Spiele für „${esc(query)}“ gefunden.`:"Für diesen Filter gibt es keine Spiele."}</div>`;
 }
 
-function card(m,now,q){
-  const p=played(m);
-  const wA=p&&m.eA>m.eB, wB=p&&m.eB>m.eA, dr=p&&m.eA===m.eB;
-  const side=(code,team,herk,pts,win,lose)=>`<div class="side ${win?"w":""}${lose?"l":""}">
+/**
+ * One match. §9.1 asks for `playing` to read differently from `open`, so a
+ * running court carries its own badge rather than only inheriting the accent of
+ * the round it sits in — on a late day the two are not the same thing.
+ */
+function card(m,state,q){
+  const done=V.isDone(m), playing=V.isPlaying(m);
+  const draw=done&&m.sa===m.sb;
+  const ko=m.phase!=="Gruppe";
+  const cls=done?"done":playing?"live":"pending";
+
+  const side=(ref,team,code,pts,other)=>{
+    const s=V.slot(D.matches,ref,team);
+    const win=done&&pts>other, lose=done&&pts<other;
+    return `<div class="side ${win?"w":""}${lose?"l":""}">
       <span class="code">${esc(code||"")}</span>
-      <span class="nm">${team?hl(team,q):`<span class="plc">${hl(herk||"offen",q)}</span>`}</span>
-      <span class="sc">${pts===null?"–":pts}</span></div>`;
-  const ko=m.phase!=="Gruppenphase";
-  return `<article class="m ${p?"done":"pending"} ${now&&!p?"now":""}">
-    <div class="mh"><span class="nr">#${m.nr}</span><span class="pl">Platz ${esc(m.platz)}</span>
-      <span class="rd ${ko?"ko":""}">${hl(m.runde,q)}</span>${dr?'<span class="nr">unentsch.</span>':""}</div>
+      <span class="nm">${s.open?`<span class="plc">${hl(s.name,q)}</span>`:hl(s.name,q)}</span>
+      <span class="sc">${pts==null?"–":pts}</span></div>`;
+  };
+
+  return `<article class="m ${cls} ${state==="now"&&!done?"now":""}">
+    <div class="mh"><span class="nr">#${m.nr}</span><span class="pl">Platz ${esc(m.court)}</span>
+      <span class="rd ${ko?"ko":""}">${hl(m.label,q)}</span>
+      ${playing?'<span class="run">läuft</span>':""}${draw?'<span class="nr">unentsch.</span>':""}</div>
     <div class="mb">
-      ${side(m.cA||m.hA,m.tA,m.hA,m.eA,wA,wB)}
-      ${side(m.cB||m.hB,m.tB,m.hB,m.eB,wB,wA)}
+      ${side(m.aRef,m.aTeam,m.aCode,m.sa,m.sb)}
+      ${side(m.bRef,m.bTeam,m.bCode,m.sb,m.sa)}
     </div></article>`;
 }
 
@@ -471,11 +486,11 @@ function renderGroups(){
   const ks=Object.keys(D.groups).sort();
   if(!ks.length){ $("#groups").innerHTML='<div class="empty">Noch keine Tabellen verfügbar.</div>'; return; }
   $("#groups").innerHTML = ks.map(k=>{
-    const rows=D.groups[k].map(t=>`<tr class="${t.rang<=2?"q":""}">
-        <td class="rk">${t.rang}</td>
+    const rows=D.groups[k].map(t=>`<tr class="${t.rank<=2?"q":""}">
+        <td class="rk">${t.rank}</td>
         <td>${esc(t.team||t.code)}<div style="font-size:10.5px;color:var(--tx3);font-weight:600">${esc(t.code)}</div></td>
-        <td>${esc(t.sp)}</td><td>${esc(t.s)}</td><td>${esc(t.u)}</td><td>${esc(t.n)}</td>
-        <td>${(+t.diff>0?"+":"")+esc(t.diff)}</td><td class="pts">${esc(t.pkt)}</td></tr>`).join("");
+        <td>${t.sp}</td><td>${t.s}</td><td>${t.u}</td><td>${t.n}</td>
+        <td>${(t.diff>0?"+":"")+t.diff}</td><td class="pts">${t.pkt}</td></tr>`).join("");
     return `<div class="gcard"><h2>Gruppe ${esc(k)}</h2>
       <table><thead><tr><th>#</th><th>Team</th><th>Sp</th><th>S</th><th>U</th><th>N</th><th>Diff</th><th>Pkt</th></tr></thead>
       <tbody>${rows}</tbody></table>
@@ -487,10 +502,10 @@ function renderRanks(){
   if(!D.ranks.length){ $("#ranks").innerHTML='<div class="empty">Noch keine Platzierung.</div>'; return; }
   const any=D.ranks.some(r=>r.team);
   $("#ranks").innerHTML = (any?"":`<div class="banner"><span>ℹ️</span><span>Die Endplatzierung füllt sich, sobald die Endrunden-Spiele ausgetragen sind.</span></div>`)
-   + D.ranks.map(r=>`<div class="pl-row ${r.platz<=3?"m"+r.platz:""}">
-      <span class="p">${r.platz}</span>
-      <span class="n">${r.team?esc(r.team):`<span class="open">noch offen</span>`}<div class="o">${esc(r.herkunft)}</div></span>
-      ${r.gruppe?`<span class="g">${esc(r.gruppe)}</span>`:""}
+   + D.ranks.map(r=>`<div class="pl-row ${r.place<=3?"m"+r.place:""}">
+      <span class="p">${r.place}</span>
+      <span class="n">${r.team?esc(r.team):`<span class="open">noch offen</span>`}<div class="o">${esc(r.origin)}</div></span>
+      ${r.group?`<span class="g">${esc(r.group)}</span>`:""}
     </div>`).join("");
 }
 
@@ -512,6 +527,7 @@ function showSetup(msg){
     <input id="sid" placeholder="Tabellen-ID oder komplette CSV-URL" autocomplete="off">
     <button id="sgo">Spielplan laden</button>
     <p style="font-size:12px;margin-top:12px">Dauerhaft: die ID im Quelltext bei <code>const SHEET = ""</code> eintragen.</p>
+    <p style="font-size:12px">Im selben Ordner müssen <code>engine.js</code> und <code>viewer.js</code> liegen.</p>
   </div>`;
   $("#sgo").onclick=()=>{
     const v=$("#sid").value.trim();
@@ -547,8 +563,17 @@ $("#rf").onclick=()=>load(true);
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden) load(); });
 window.addEventListener("scroll",()=>{ const t=$("#tools"); if(t) t.classList.toggle("stuck",t.getBoundingClientRect().top<=1); },{passive:true});
 
-load();
-setInterval(()=>{ if(!document.hidden) load(); },AUTO);
+/*
+ * Der Viewer besteht aus drei Dateien. Fehlt eine, sagt die Seite das, statt
+ * weiß zu bleiben: index.html wird herumkopiert, engine.js und viewer.js
+ * werden dabei leicht vergessen.
+ */
+if(!E || !V){
+  showError("engine.js und viewer.js müssen im selben Ordner wie index.html liegen.");
+}else{
+  load();
+  setInterval(()=>{ if(!document.hidden) load(); },AUTO);
+}
 </script>
 </body>
 </html>

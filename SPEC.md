@@ -51,8 +51,11 @@ Opens  app-url/?id=<SHEET_ID>            → public viewer
        app-url/?id=<SHEET_ID>&k=<TOKEN>  → admin
 ```
 
-The app itself is a single static `index.html` hosted anywhere (GitHub Pages).
-One deployment serves every organizer; the `id` parameter selects the tournament.
+The app itself is static files hosted anywhere (GitHub Pages): the two screens,
+`index.html` (viewer) and `round.html` (admin), beside the modules they load —
+`engine.js`, `viewer.js`, `sheet.js`. No build step; the files are served as
+they are written. One deployment serves every organizer; the `id` parameter
+selects the tournament.
 
 **Why a bound script:** an Apps Script attached to a spreadsheet is copied along
 with the spreadsheet. So the template carries its own write endpoint. The
@@ -587,12 +590,28 @@ the UI — which is exactly the migration this project is performing.
 ### 9.1 Viewer (public, mobile-first)
 
 Essentially the existing `index.html`. Tabs: Spiele, Gruppen, Platzierung.
-Filter chips, search, live polling. Changes required:
+Filter chips, search, live polling. The three changes step 10 made:
 
-- Read `round` and compute the time instead of reading `zeit`
-- Render `status = playing` distinctly from `open`
+- Reads `round` and computes the time from the `C` line, the round index and the
+  `P` breaks, instead of reading `zeit`
+- Renders `status = playing` distinctly from `open` — a running court carries its
+  own badge, not only the accent of the round it sits in
 - Current round = first incomplete round (fixes the 2026 bug where one unplayed
   match pinned "Jetzt" to an early time block)
+
+The page draws; it derives nothing. `viewer.js` holds the data layer — reading
+§8 and assembling the blocks — and calls `timeline()` for every time it shows,
+so the public screen and the round screen cannot disagree about when a round
+starts. Splitting it out is also what makes it testable from a terminal: logic
+inside an inline `<script>` cannot be checked against the fixture, and §11 asks
+for exactly that.
+
+**The viewer shows planned times, not live ones.** `liveStart` needs `doneAt`
+(§6.1) and the `M` line does not carry it, so in the viewer `liveStart` always
+equals `plannedStart` and the drift is always zero. This is deliberate: the
+stamp is an admin observation living in `Spielplan`, and the screen that shows
+drift is the round screen (§9.2). The viewer computes drift the same way anyway,
+so it needs no change on the day a stamp does reach it.
 
 ### 9.2 Round screen (admin, mobile)
 
@@ -625,6 +644,10 @@ manual draw adjustment, generate, validate, write to sheet.
 | 9 | Apps Script write path | 8 |
 | 10 | Viewer updates | 7 |
 
+All ten are built. The engine is `engine.js`, the two screens are `index.html`
+and `round.html`, the seams are `sheet.js` (§3) and `viewer.js` (§8), and every
+derivation is checked against the 2026 fixture by `node test/run.js`.
+
 Steps 1–5 produce a usable planning tool on their own. Steps 6–8 are the
 tournament-day half. Step 9 is what removes the need to open the spreadsheet.
 
@@ -645,5 +668,7 @@ against it.
   the A2/A4 and B2/B7 ties resolved on difference
 - The placement generator must reproduce the 33-match endrunde structure
 - The resolver must reproduce final placement 1–30
+- The viewer must land on the same 34 round start times the v1 file recorded, and
+  recompute the seven breaks onto the same clock ranges it wrote out as text
 
 If any of these disagree, the new engine is wrong, not the fixture.
