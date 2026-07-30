@@ -7,8 +7,17 @@ das Rundenblatt am Handy.
 
 ## 1. Tabelle anlegen
 
-Die Vorlage in Google Drive kopieren. Die Kopie braucht fünf Blätter, genau so
-geschrieben:
+Beim ersten Mal wird die Vorlage einmal erzeugt:
+
+1. Eine neue, leere Google-Tabelle anlegen.
+2. **Erweiterungen → Apps Script**. Den Inhalt von `Vorlage.gs` aus diesem
+   Ordner hineinkopieren und speichern.
+3. Zurück in die Tabelle, einmal neu laden. Oben steht jetzt das Menü
+   **Turnier**.
+4. **Turnier → Tabelle einrichten**.
+
+Damit stehen die fünf Blätter da, `Config` ist mit Vorgaben gefüllt und ein
+Kennwort ist erzeugt:
 
 | Blatt | Inhalt |
 |---|---|
@@ -16,7 +25,18 @@ geschrieben:
 | `Teams` | ein Team je Zeile |
 | `Spielplan` | wird von der App geschrieben |
 | `WEB` | wird von der App geschrieben |
-| `Anleitung` | dieser Text |
+| `Anleitung` | die Kurzfassung dieses Textes |
+
+**Turnier → Tabelle einrichten** darf jederzeit noch einmal aufgerufen werden.
+Es schreibt nur in leere Blätter und ergänzt in `Config` fehlende Schlüssel; eine
+ausgefüllte Teamliste bleibt, wie sie ist.
+
+**Für jedes weitere Turnier** eine Kopie dieser Tabelle anlegen
+(`Datei → Kopie erstellen`). In der Kopie `Teams`, `Spielplan` und `WEB` leeren —
+und **Abschnitt 4 noch einmal durchlaufen**. Das Skript wird mitkopiert, aber als
+neues Projekt: die alte `endpoint`-Adresse in `Config` gehört weiterhin zur
+Tabelle vom letzten Jahr, und wer sie stehen lässt, schreibt das neue Turnier
+dorthin.
 
 ## 2. `Config` ausfüllen
 
@@ -77,7 +97,8 @@ Das Skript hängt an der Tabelle, wird also mitkopiert. Es muss nur einmal
 freigeschaltet werden.
 
 1. In der Tabelle: **Erweiterungen → Apps Script**.
-2. Den Inhalt von `Code.gs` aus diesem Ordner hineinkopieren und speichern.
+2. Über **+ → Skript** eine zweite Datei neben `Vorlage.gs` anlegen, den Inhalt
+   von `Code.gs` aus diesem Ordner hineinkopieren und speichern.
 3. **Bereitstellen → Neue Bereitstellung**, Typ **Web-App**.
 4. **Ausführen als: Ich**, **Zugriff: Jeder**.
 5. Bereitstellen, den Google-Warnhinweis bestätigen.
@@ -91,6 +112,9 @@ lehnt das Skript **jeden** Schreibversuch ab.
 
 Nach jeder Änderung an `Code.gs`: **Bereitstellen → Bereitstellungen verwalten →
 Bearbeiten → Neue Version**. Sonst läuft weiter der alte Stand.
+
+`Vorlage.gs` wird nicht bereitgestellt — es läuft nur über das Menü und ist nach
+dem Einrichten fertig. Wer es löscht, verliert nur das Menü.
 
 ## 5. Freigeben
 

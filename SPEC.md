@@ -73,6 +73,16 @@ tournament.
 Five tabs. Only `Config`, `Teams`, and `Spielplan` are written by humans or the
 app; `WEB` is generated output; `Anleitung` is documentation.
 
+The template is built by `sheet/Vorlage.gs`, a second Apps Script file pasted
+beside `Code.gs`. It installs a **Turnier → Tabelle einrichten** menu item that
+creates the five tabs, fills `Config` with the defaults below, writes the two
+header rows and generates a token. It writes only into empty tabs, so re-running
+it on a live tournament sheet is safe.
+
+It is separate from `Code.gs` because `Code.gs` is the deployed endpoint and has
+to be re-versioned on every edit; setup runs from the menu and is never deployed.
+`Vorlage.gs` may be deleted from the script project once a sheet is set up.
+
 ### 3.1 `Config`
 
 Key/value pairs, column A = key, column B = value.
@@ -643,13 +653,15 @@ manual draw adjustment, generate, validate, write to sheet.
 | 8 | Round screen: delay, promote, result entry | 6, 7 |
 | 9 | Apps Script write path | 8 |
 | 10 | Viewer updates | 7 |
+| 11 | Template builder (`sheet/Vorlage.gs`) | 9 |
 
-All ten are built. The engine is `engine.js`, the two screens are `index.html`
+All eleven are built. The engine is `engine.js`, the two screens are `index.html`
 and `round.html`, the seams are `sheet.js` (§3) and `viewer.js` (§8), and every
 derivation is checked against the 2026 fixture by `node test/run.js`.
 
 Steps 1–5 produce a usable planning tool on their own. Steps 6–8 are the
-tournament-day half. Step 9 is what removes the need to open the spreadsheet.
+tournament-day half. Step 9 is what removes the need to open the spreadsheet,
+and step 11 the need to build it by hand.
 
 **Expect steps 6 and 8 to take longer than they look.** The placement generator
 hides its complexity in bucket edge cases; the promote scoring is easy to write
